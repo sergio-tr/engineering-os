@@ -189,7 +189,8 @@ def build_command(
         "userns_keep_id": True,
     }
 
-    cmd: list[str] = [
+    # Launcher options only (image + workload appended after validation).
+    launcher: list[str] = [
         "podman",
         "run",
         "--pull=never",
@@ -217,13 +218,13 @@ def build_command(
         workdir_in_container,
     ]
     if rm:
-        cmd.append("--rm")
+        launcher.append("--rm")
     if name:
         if not re.fullmatch(r"eos-sandbox-poc-[A-Za-z0-9._-]{4,80}", name):
             _die(f"refusing non-PoC container name: {name!r}")
-        cmd.extend(["--name", name])
+        launcher.extend(["--name", name])
 
-    cmd.extend(
+    launcher.extend(
         [
             "-e",
             "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
@@ -231,25 +232,12 @@ def build_command(
             "HOME=/tmp",
             "-e",
             "LANG=C.UTF-8",
-            image,
-            *inner_command,
         ]
     )
 
-    joined = " ".join(cmd)
-    for bad in (
-        "--privileged",
-        "--env-host",
-        "docker.sock",
-        "podman.sock",
-        "SSH_AUTH_SOCK",
-        str(Path.home()),
-    ):
-        if bad in joined and bad not in ws:
-            if bad == str(Path.home()):
-                _die("refusing command that references host HOME")
-            _die(f"refusing forbidden command element: {bad}")
-
+    # Fail closed on launcher/mount configuration before attaching workload.
+    # Socket path literals inside fixed-catalog workload scripts (P8) are allowed.
+    cmd = launcher + [image, *inner_command]
     argv_probe = scan_argv_safety(cmd, workspace=workspace)
     if not argv_probe.get("argv_passed_safety_scan"):
         _die(f"command failed argv safety scan: {argv_probe.get('reject_reason')}")
@@ -390,9 +378,23 @@ def _inner_p6_pids() -> str:
     )
 
 
-def plan_tests(root: Path, runtime: str, image: str) -> list[dict[str, Any]]:
+def plan_tests(
+    root: Path,
+    runtime: str,
+    image: str,
+    test_ids: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Build fixed-catalog entries.
+
+    When *test_ids* is provided, only those allow-listed ids are constructed.
+    Requesting ``P1`` must not fail due to unrelated ``P8`` workload strings.
+    """
     if runtime != "podman":
         runtime = "podman"
+    selected = set(test_ids) if test_ids is not None else set(ALLOWED_TEST_IDS)
+    unknown = sorted(selected - set(ALLOWED_TEST_IDS))
+    if unknown:
+        _die(f"unsupported test ids in plan_tests: {unknown}")
     alpha = root / SYNTH_ALPHA
     outside = root / "outside-host"
     secrets = root / "synthetic-secrets"
@@ -495,8 +497,8 @@ def plan_tests(root: Path, runtime: str, image: str) -> list[dict[str, Any]]:
             item["canary"] = canary
         return item
 
-    return [
-        entry(
+    catalog = [
+        ("P1", lambda: entry(
             "P1",
             "Allowed write inside authorized workspace",
             ["/bin/sh", "-c", "echo ok > /workspace/p1.txt; test -s /workspace/p1.txt"],
@@ -517,8 +519,8 @@ def plan_tests(root: Path, runtime: str, image: str) -> list[dict[str, Any]]:
                     "userns keep-id is planned; reported separately if inspect cannot prove it.",
                 ],
             },
-        ),
-        entry(
+        )),
+        ("P2", lambda: entry(
             "P2",
             "Denied write outside authorized workspace",
             ["/bin/sh", "-c", _inner_p2()],
@@ -533,8 +535,8 @@ def plan_tests(root: Path, runtime: str, image: str) -> list[dict[str, Any]]:
                 },
             },
             canary=str(outside / OUTSIDE_NAME),
-        ),
-        entry(
+        )),
+        ("P3", lambda: entry(
             "P3",
             "Denied read of second synthetic project",
             ["/bin/sh", "-c", _inner_p3()],
@@ -550,8 +552,8 @@ def plan_tests(root: Path, runtime: str, image: str) -> list[dict[str, Any]]:
                 },
             },
             canary=str(beta / "marker.txt"),
-        ),
-        entry(
+        )),
+        ("P4", lambda: entry(
             "P4",
             "Denied access to synthetic host-secret canary",
             ["/bin/sh", "-c", _inner_p4()],
@@ -567,8 +569,8 @@ def plan_tests(root: Path, runtime: str, image: str) -> list[dict[str, Any]]:
                 },
             },
             canary=str(secrets / SECRET_NAME),
-        ),
-        entry(
+        )),
+        ("P5", lambda: entry(
             "P5",
             "Default-deny network egress",
             ["/bin/sh", "-c", _inner_p5()],
@@ -590,8 +592,8 @@ def plan_tests(root: Path, runtime: str, image: str) -> list[dict[str, Any]]:
                     "and runtime NetworkMode=none. unavailable probes FAIL.",
                 ],
             },
-        ),
-        entry(
+        )),
+        ("P6", lambda: entry(
             "P6",
             "Resource and wall-clock limits",
             ["/bin/sh", "-c", "dd if=/dev/zero of=/tmp/big bs=1M count=200"],
@@ -611,14 +613,13 @@ def plan_tests(root: Path, runtime: str, image: str) -> list[dict[str, Any]]:
             cpus="0.20",
             pids=32,
             host_timeout_seconds=20,
-        ),
-        entry(
+        )),
+        ("P7", lambda: entry(
             "P7",
             "Clean shutdown and cleanup",
             ["/bin/sh", "-c", "echo cleanup-marker"],
             assertion={
                 "id": "P7",
-                # rm_flag is proven by cleanup postconditions, not inspect of a live container.
                 "required_controls": ["workspace_only_mount", "read_only_root"],
                 "expect": {"exit_code_in": [0]},
                 "notes": [
@@ -626,8 +627,8 @@ def plan_tests(root: Path, runtime: str, image: str) -> list[dict[str, Any]]:
                     "Inspect errors must not be treated as absence.",
                 ],
             },
-        ),
-        entry(
+        )),
+        ("P8", lambda: entry(
             "P8",
             "Denied host container-runtime sockets",
             [
@@ -647,8 +648,10 @@ def plan_tests(root: Path, runtime: str, image: str) -> list[dict[str, Any]]:
                     "require_probe_markers": ["PROBE_MARKER=P8", "SOCKET_VISIBLE=0"],
                 },
             },
-        ),
+        )),
     ]
+    # Construct only selected allow-listed entries (P1 request must not build P8).
+    return [builder() for tid, builder in catalog if tid in selected]
 
 
 def sanitize_command(cmd: list[str], workspace: Path) -> list[str]:
@@ -1350,7 +1353,10 @@ def run_execute(
     alpha = fixture_root / SYNTH_ALPHA
     verify_workspace_ownership(alpha, policy)
 
-    catalog = {t["id"]: t for t in plan_tests(fixture_root, "podman", image)}
+    catalog = {
+        t["id"]: t
+        for t in plan_tests(fixture_root, "podman", image, test_ids=test_ids)
+    }
     results: list[dict[str, Any]] = []
     status_map = {tid: "NOT_TESTED" for tid in ALLOWED_TEST_IDS}
     started_names: list[str] = []
@@ -1554,9 +1560,7 @@ def main() -> int:
     os.chmod(plan_root, 0o700)
     try:
         prepare_fixtures(plan_root)
-        for test in plan_tests(plan_root, "podman", plan_image):
-            if test["id"] not in test_ids:
-                continue
+        for test in plan_tests(plan_root, "podman", plan_image, test_ids=test_ids):
             summary["tests"].append(
                 {
                     "id": test["id"],

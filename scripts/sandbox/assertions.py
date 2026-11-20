@@ -34,12 +34,43 @@ FIXTURE_MARKER_CONTENT = "eos-sandbox-poc-synthetic-v1\n"
 FIXTURE_NAME_RE = re.compile(r"^eos-sandbox-poc-[A-Za-z0-9._-]{4,80}$")
 EXPECTED_CHILDREN = ("synth-alpha", "synth-beta", "outside-host", "synthetic-secrets")
 ALLOWED_TEST_IDS = tuple(f"P{i}" for i in range(1, 9))
-FORBIDDEN_ARGV_MARKERS = (
+FORBIDDEN_LAUNCHER_FLAGS = (
     "--privileged",
     "--env-host",
+)
+# Socket path literals are forbidden in mount/volume *sources*, not in workload text.
+SOCKET_PATH_MARKERS = (
     "docker.sock",
     "podman.sock",
-    "SSH_AUTH_SOCK",
+)
+# Options after `podman run` that consume a following value token.
+PODMAN_RUN_VALUE_OPTS = frozenset(
+    {
+        "--network",
+        "--user",
+        "--cap-drop",
+        "--security-opt",
+        "--memory",
+        "--cpus",
+        "--pids-limit",
+        "--tmpfs",
+        "--mount",
+        "--workdir",
+        "--name",
+        "--volume",
+        "-v",
+        "-e",
+        "--env",
+        "--annotation",
+        "--label",
+        "-l",
+        "--uidmap",
+        "--gidmap",
+        "--userns",
+        "--runtime",
+        "--cgroup-manager",
+        "--pull",
+    }
 )
 VALID_CONTROL_EVIDENCE_SOURCES = frozenset(
     {
@@ -265,78 +296,260 @@ def sanitize_evidence_text(text: str) -> str:
     return redacted[:8000]
 
 
-def scan_argv_safety(cmd: list[str], *, workspace: Path) -> dict[str, Any]:
-    """Safety-scan executed/planned argv. This is NOT runtime enforcement proof."""
+def split_podman_run_argv(cmd: list[str]) -> dict[str, Any]:
+    """Split ``podman run [opts...] IMAGE [workload...]`` into layers.
+
+    Workload arguments are the fixed-catalog test script and must not be treated
+    as launcher mount/security configuration.
+    """
     if not cmd or cmd[0] != "podman" or "run" not in cmd[:3]:
         return {
+            "ok": False,
+            "error": "argv must start with podman run",
+            "launcher_opts": [],
+            "image": None,
+            "workload": [],
+        }
+    # Support both ``podman run`` and ``podman --x run`` (we only emit the former).
+    try:
+        run_idx = cmd.index("run")
+    except ValueError:
+        return {
+            "ok": False,
+            "error": "missing run subcommand",
+            "launcher_opts": [],
+            "image": None,
+            "workload": [],
+        }
+    i = run_idx + 1
+    while i < len(cmd):
+        arg = cmd[i]
+        if arg == "--":
+            i += 1
+            break
+        if arg.startswith("-"):
+            base = arg.split("=", 1)[0]
+            if "=" in arg:
+                i += 1
+                continue
+            if base in PODMAN_RUN_VALUE_OPTS:
+                i += 2
+                continue
+            i += 1
+            continue
+        # First non-option token is the image reference.
+        image = arg
+        launcher_opts = cmd[:i]
+        workload = cmd[i + 1 :]
+        return {
+            "ok": True,
+            "launcher_opts": launcher_opts,
+            "image": image,
+            "workload": workload,
+            "image_index": i,
+        }
+    return {
+        "ok": False,
+        "error": "image reference not found in podman run argv",
+        "launcher_opts": cmd,
+        "image": None,
+        "workload": [],
+    }
+
+
+def _mount_specs_from_launcher(launcher_opts: list[str]) -> list[str]:
+    """Collect bind/volume mount specification strings from launcher options only."""
+    specs: list[str] = []
+    i = 0
+    while i < len(launcher_opts):
+        arg = launcher_opts[i]
+        if arg == "--mount" and i + 1 < len(launcher_opts):
+            specs.append(launcher_opts[i + 1])
+            i += 2
+            continue
+        if arg.startswith("--mount="):
+            specs.append(arg.split("=", 1)[1])
+            i += 1
+            continue
+        if arg in {"-v", "--volume"} and i + 1 < len(launcher_opts):
+            specs.append(launcher_opts[i + 1])
+            i += 2
+            continue
+        if arg.startswith("--volume="):
+            specs.append(arg.split("=", 1)[1])
+            i += 1
+            continue
+        i += 1
+    return specs
+
+
+def _env_assignments_from_launcher(launcher_opts: list[str]) -> list[str]:
+    values: list[str] = []
+    i = 0
+    while i < len(launcher_opts):
+        arg = launcher_opts[i]
+        if arg in {"-e", "--env"} and i + 1 < len(launcher_opts):
+            values.append(launcher_opts[i + 1])
+            i += 2
+            continue
+        if arg.startswith("--env="):
+            values.append(arg.split("=", 1)[1])
+            i += 1
+            continue
+        i += 1
+    return values
+
+
+def scan_argv_safety(cmd: list[str], *, workspace: Path) -> dict[str, Any]:
+    """Safety-scan launcher options and mounts only (not workload text).
+
+    This is NOT runtime enforcement proof. Socket path strings inside the fixed
+    P8 negative-test workload are allowed; mounting those sockets is not.
+    """
+    split = split_podman_run_argv(cmd)
+    if not split.get("ok"):
+        return {
             "argv_passed_safety_scan": False,
-            "reject_reason": "argv must start with podman run",
+            "reject_reason": split.get("error") or "invalid podman run argv",
             "launcher_argv_controls": {},
             "evidence_layer": "executed_argv",
         }
 
-    joined = " ".join(cmd)
-    for marker in FORBIDDEN_ARGV_MARKERS:
-        if marker in joined:
+    launcher_opts: list[str] = list(split["launcher_opts"])
+    workload: list[str] = list(split["workload"] or [])
+    home = str(Path.home())
+    ws = str(workspace.resolve())
+
+    # Forbidden launcher flags (never acceptable in opts).
+    for flag in FORBIDDEN_LAUNCHER_FLAGS:
+        if flag in launcher_opts:
             return {
                 "argv_passed_safety_scan": False,
-                "reject_reason": f"forbidden marker present: {marker}",
+                "reject_reason": f"forbidden launcher flag present: {flag}",
                 "launcher_argv_controls": {},
                 "evidence_layer": "executed_argv",
             }
 
-    home = str(Path.home())
-    ws = str(workspace.resolve())
-    bind_mounts = [p for p in cmd if p.startswith("type=bind,src=")]
-    if len(bind_mounts) != 1:
+    # Credential / agent env inheritance via launcher env options.
+    for env_assign in _env_assignments_from_launcher(launcher_opts):
+        key = env_assign.split("=", 1)[0]
+        if key in {"SSH_AUTH_SOCK", "GITHUB_TOKEN", "GH_TOKEN", "AWS_SECRET_ACCESS_KEY"}:
+            return {
+                "argv_passed_safety_scan": False,
+                "reject_reason": f"forbidden inherited credential env: {key}",
+                "launcher_argv_controls": {},
+                "evidence_layer": "executed_argv",
+            }
+        if "SSH_AUTH_SOCK" in env_assign:
+            return {
+                "argv_passed_safety_scan": False,
+                "reject_reason": "forbidden SSH_AUTH_SOCK in launcher env",
+                "launcher_argv_controls": {},
+                "evidence_layer": "executed_argv",
+            }
+
+    mount_specs = _mount_specs_from_launcher(launcher_opts)
+    # Reject socket mounts and arbitrary host binds (inspect mount sources only).
+    for spec in mount_specs:
+        lowered = spec.lower()
+        for sock in SOCKET_PATH_MARKERS:
+            if sock in lowered:
+                return {
+                    "argv_passed_safety_scan": False,
+                    "reject_reason": f"forbidden runtime socket mount: {sock}",
+                    "launcher_argv_controls": {},
+                    "evidence_layer": "executed_argv",
+                }
+        # Classic -v /path:/path form: source is before first colon.
+        if spec.startswith("type=bind,src="):
+            src = spec[len("type=bind,src=") :].split(",dst=", 1)[0]
+        else:
+            src = spec.split(":", 1)[0]
+        if home and (src == home or src.startswith(home + "/")):
+            return {
+                "argv_passed_safety_scan": False,
+                "reject_reason": "bind mount must not reference host HOME",
+                "launcher_argv_controls": {},
+                "evidence_layer": "executed_argv",
+            }
+
+    bind_mounts = [s for s in mount_specs if s.startswith("type=bind,src=")]
+    # Also treat bare -v specs as binds.
+    volume_binds = [s for s in mount_specs if not s.startswith("type=")]
+    all_binds = bind_mounts + volume_binds
+    if len(all_binds) != 1:
         return {
             "argv_passed_safety_scan": False,
-            "reject_reason": f"expected exactly one bind mount, found {len(bind_mounts)}",
+            "reject_reason": f"expected exactly one bind mount, found {len(all_binds)}",
             "launcher_argv_controls": {},
             "evidence_layer": "executed_argv",
         }
-    if not bind_mounts[0].startswith(f"type=bind,src={ws},dst=/workspace"):
-        return {
-            "argv_passed_safety_scan": False,
-            "reject_reason": "bind mount must map disposable workspace to /workspace",
-            "launcher_argv_controls": {},
-            "evidence_layer": "executed_argv",
-        }
-    if home and home in bind_mounts[0]:
-        return {
-            "argv_passed_safety_scan": False,
-            "reject_reason": "bind mount must not reference host HOME",
-            "launcher_argv_controls": {},
-            "evidence_layer": "executed_argv",
-        }
+    only = all_binds[0]
+    if only.startswith("type=bind,src="):
+        if not only.startswith(f"type=bind,src={ws},dst=/workspace"):
+            return {
+                "argv_passed_safety_scan": False,
+                "reject_reason": "bind mount must map disposable workspace to /workspace",
+                "launcher_argv_controls": {},
+                "evidence_layer": "executed_argv",
+            }
+    else:
+        # -v src:dst[:opts]
+        parts = only.split(":")
+        if len(parts) < 2 or parts[0] != ws or parts[1] != "/workspace":
+            return {
+                "argv_passed_safety_scan": False,
+                "reject_reason": "volume bind must map disposable workspace to /workspace",
+                "launcher_argv_controls": {},
+                "evidence_layer": "executed_argv",
+            }
+
+    # Workload may mention socket paths (P8). Launcher opts must not.
+    launcher_joined = " ".join(launcher_opts)
+    for sock in SOCKET_PATH_MARKERS:
+        if sock in launcher_joined:
+            return {
+                "argv_passed_safety_scan": False,
+                "reject_reason": f"forbidden socket marker in launcher options: {sock}",
+                "launcher_argv_controls": {},
+                "evidence_layer": "executed_argv",
+            }
 
     def has(*tokens: str) -> bool:
-        return all(t in cmd for t in tokens)
+        return all(t in launcher_opts for t in tokens)
 
     launcher_argv_controls = {
-        "read_only_root": "--read-only" in cmd,
+        "read_only_root": "--read-only" in launcher_opts,
         "network_none": has("--network", "none"),
         "cap_drop_all": has("--cap-drop", "ALL"),
         "no_new_privileges": has("--security-opt", "no-new-privileges"),
-        "pull_never": "--pull=never" in cmd,
-        "rm_flag": "--rm" in cmd,
-        "tmpfs_tmp": any(p.startswith("/tmp:") or p.startswith("/tmp=") for p in cmd)
-        or any(str(p).startswith("/tmp:") for p in cmd),
-        "memory_limit": "--memory" in cmd,
-        "cpu_limit": "--cpus" in cmd,
-        "pids_limit": "--pids-limit" in cmd,
+        "pull_never": "--pull=never" in launcher_opts or any(
+            a.startswith("--pull=") and a.endswith("never") for a in launcher_opts
+        ),
+        "rm_flag": "--rm" in launcher_opts,
+        "tmpfs_tmp": any(
+            a == "--tmpfs" or a.startswith("--tmpfs=") or a.startswith("/tmp:")
+            for a in launcher_opts
+        ),
+        "memory_limit": "--memory" in launcher_opts
+        or any(a.startswith("--memory=") for a in launcher_opts),
+        "cpu_limit": "--cpus" in launcher_opts
+        or any(a.startswith("--cpus=") for a in launcher_opts),
+        "pids_limit": "--pids-limit" in launcher_opts
+        or any(a.startswith("--pids-limit=") for a in launcher_opts),
         "workspace_only_mount": True,
-        "no_docker_socket_mount": "docker.sock" not in joined and "podman.sock" not in joined,
+        "no_docker_socket_mount": True,
         "no_host_home_mount": True,
-        "minimal_env": "-e" in cmd and "SSH_AUTH_SOCK" not in joined,
-        "userns_keep_id": "--userns=keep-id" in cmd,
+        "minimal_env": ("-e" in launcher_opts or "--env" in launcher_opts),
+        "userns_keep_id": "--userns=keep-id" in launcher_opts
+        or has("--userns", "keep-id"),
         "non_root_user": False,
-        "privileged": "--privileged" in cmd,
+        "privileged": "--privileged" in launcher_opts,
     }
-    if "--user" in cmd:
-        idx = cmd.index("--user")
-        if idx + 1 < len(cmd):
-            user_spec = cmd[idx + 1]
+    if "--user" in launcher_opts:
+        idx = launcher_opts.index("--user")
+        if idx + 1 < len(launcher_opts):
+            user_spec = launcher_opts[idx + 1]
             launcher_argv_controls["non_root_user"] = (
                 user_spec != "0:0" and not user_spec.startswith("0:")
             )
@@ -344,24 +557,30 @@ def scan_argv_safety(cmd: list[str], *, workspace: Path) -> dict[str, Any]:
     return {
         "argv_passed_safety_scan": True,
         "launcher_argv_controls": launcher_argv_controls,
-        "bind_mount_count": len(bind_mounts),
+        "bind_mount_count": len(all_binds),
+        "workload_len": len(workload),
+        "workload_may_mention_sockets": any(
+            sock in part for part in workload for sock in SOCKET_PATH_MARKERS
+        ),
         "evidence_layer": "executed_argv",
-        # Explicit: argv-derived flags are not runtime observations.
         "is_runtime_enforcement_proof": False,
     }
 
 
-# Backward-compatible alias used by older call sites during transition.
 def observe_controls_from_argv(cmd: list[str], *, workspace: Path) -> dict[str, Any]:
-    """Deprecated name: argv scan only. Does not prove runtime enforcement."""
+    """Inspect launcher configuration/mounts only; workload text is not config.
+
+    Does not prove runtime enforcement. Socket literals in P8 workload are OK;
+    socket bind mounts are rejected.
+    """
     probe = scan_argv_safety(cmd, workspace=workspace)
-    # Do not present argv flags as observed_controls.
     return {
         "argv_passed_safety_scan": probe.get("argv_passed_safety_scan"),
         "reject_reason": probe.get("reject_reason"),
         "launcher_argv_controls": probe.get("launcher_argv_controls") or {},
         "observed_controls": {},
         "bind_mount_count": probe.get("bind_mount_count"),
+        "workload_may_mention_sockets": probe.get("workload_may_mention_sockets"),
         "is_runtime_enforcement_proof": False,
         "evidence_layer": "executed_argv",
     }
@@ -833,6 +1052,51 @@ def self_check() -> None:
             raise AssertionError(f"safe argv rejected: {probe}")
         if probe.get("is_runtime_enforcement_proof"):
             raise AssertionError("argv scan must not claim runtime enforcement proof")
+
+        # P8 workload may mention socket paths; mounts must still be rejected.
+        p8_cmd = list(safe_cmd[:-1]) + [
+            "/bin/sh",
+            "-c",
+            "for p in /var/run/docker.sock /run/podman/podman.sock; do "
+            "if [ -S \"$p\" ]; then exit 10; fi; done; exit 0",
+        ]
+        p8_probe = scan_argv_safety(p8_cmd, workspace=ws)
+        if not p8_probe.get("argv_passed_safety_scan"):
+            raise AssertionError(f"P8 workload socket literals incorrectly rejected: {p8_probe}")
+        if not p8_probe.get("workload_may_mention_sockets"):
+            raise AssertionError("P8 probe should note workload socket literals")
+
+        docker_sock_mount = list(safe_cmd)
+        mi = docker_sock_mount.index("--mount")
+        docker_sock_mount[mi + 1] = (
+            f"type=bind,src=/var/run/docker.sock,dst=/var/run/docker.sock,rw"
+        )
+        bad_docker = scan_argv_safety(docker_sock_mount, workspace=ws)
+        if bad_docker.get("argv_passed_safety_scan"):
+            raise AssertionError("docker.sock bind mount must be rejected")
+
+        podman_sock_mount = list(safe_cmd)
+        mi = podman_sock_mount.index("--mount")
+        podman_sock_mount[mi + 1] = (
+            "type=bind,src=/run/podman/podman.sock,dst=/run/podman/podman.sock,rw"
+        )
+        bad_podman = scan_argv_safety(podman_sock_mount, workspace=ws)
+        if bad_podman.get("argv_passed_safety_scan"):
+            raise AssertionError("podman.sock bind mount must be rejected")
+
+        # Place --privileged in launcher opts (before image), not after workload.
+        priv = list(safe_cmd)
+        priv.insert(priv.index("alpine:3.20"), "--privileged")
+        bad_priv = scan_argv_safety(priv, workspace=ws)
+        if bad_priv.get("argv_passed_safety_scan"):
+            raise AssertionError("privileged mode must be rejected")
+
+        arbitrary = list(safe_cmd)
+        mi = arbitrary.index("--mount")
+        arbitrary[mi + 1] = f"type=bind,src={root.resolve()},dst=/workspace,rw"
+        bad_arb = scan_argv_safety(arbitrary, workspace=ws)
+        if bad_arb.get("argv_passed_safety_scan"):
+            raise AssertionError("arbitrary host bind mount must be rejected")
 
         # Argv-only evidence must FAIL evaluation.
         argv_only = evaluate_negative_result(

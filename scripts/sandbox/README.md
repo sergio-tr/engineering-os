@@ -11,6 +11,10 @@ Synthetic, fail-closed isolation harness for Engineering OS.
 
 Do not treat argv scans as independently observed runtime enforcement.
 
+Argv safety inspection covers **launcher options and mount sources only**. Socket path
+literals inside the fixed P8 workload script are allowed; mounting Docker/Podman
+sockets remains forbidden. Selecting `--tests P1` builds only P1.
+
 ## Scope and safety
 
 - Rootless Podman only for execute
