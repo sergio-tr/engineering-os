@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Fail-closed synthetic isolation PoC launcher for Engineering OS.
 
-Phase B1: executable harness for Owner-authorized later runs.
+Phase B2: runtime security evidence closure (CPU, capabilities, userns).
 
 Evidence layers (never conflated):
   1. launcher_config / planned_controls
@@ -32,18 +32,27 @@ if str(SANDBOX_DIR) not in sys.path:
     sys.path.insert(0, str(SANDBOX_DIR))
 
 from assertions import (  # noqa: E402
+    capability_drop_all_attributed,
+    cpu_quota_matches_configured,
+    cpu_stat_delta,
+    cpu_throttling_attributed,
     ensure_fixture_marker,
     evaluate_negative_result,
     memory_limit_attributed,
     parse_container_path_kind,
+    parse_cpu_max,
+    parse_cpu_stat,
+    parse_id_map,
     parse_podman_inspect,
     parse_probe_status,
+    parse_proc_status_capabilities,
     parse_test_ids,
     pids_limit_attributed,
     safe_to_cleanup_fixture_root,
     sanitize_evidence_text,
     scan_argv_safety,
     sha256_file,
+    userns_keep_id_attributed,
     validate_fixture_root,
     validate_fixture_structure,
     wall_clock_attributed,
@@ -378,6 +387,46 @@ def _inner_p6_pids() -> str:
     )
 
 
+def _inner_p6_cpu() -> str:
+    """Bounded CPU-saturating workload (no extra packages)."""
+    return (
+        "echo PROBE_MARKER=P6_CPU; "
+        "echo CPU_WORK_START=1; "
+        "i=0; while [ \"$i\" -lt 4 ]; do "
+        "  (while true; do :; done) & "
+        "  i=$((i+1)); "
+        "done; "
+        "sleep 8; "
+        "echo CPU_WORK_END=1; "
+        "kill $(jobs -p) 2>/dev/null; "
+        "wait 2>/dev/null; "
+        "exit 0"
+    )
+
+
+def _inner_security_identity() -> str:
+    """Emit capability and userns markers; write a workspace ownership marker."""
+    return (
+        "echo PROBE_MARKER=SECURITY_IDENTITY; "
+        "echo CONTAINER_UID=$(id -u); "
+        "echo CONTAINER_GID=$(id -g); "
+        "echo USERNS_INODE=$(ls -id /proc/self/ns/user 2>/dev/null | awk '{print $1}'); "
+        "echo '---UID_MAP---'; "
+        "cat /proc/self/uid_map 2>/dev/null || echo UID_MAP_UNAVAILABLE=1; "
+        "echo '---GID_MAP---'; "
+        "cat /proc/self/gid_map 2>/dev/null || echo GID_MAP_UNAVAILABLE=1; "
+        "echo '---STATUS_CAPS---'; "
+        "sed -n "
+        "'/^CapInh:/p;/^CapPrm:/p;/^CapEff:/p;/^CapBnd:/p;/^CapAmb:/p;"
+        "/^NoNewPrivs:/p;/^Seccomp:/p' /proc/self/status 2>/dev/null "
+        "|| echo STATUS_CAPS_UNAVAILABLE=1; "
+        "echo '---END_STATUS_CAPS---'; "
+        "echo marker > /workspace/security-identity-marker.txt; "
+        "test -s /workspace/security-identity-marker.txt; "
+        "exit 0"
+    )
+
+
 def plan_tests(
     root: Path,
     runtime: str,
@@ -599,20 +648,22 @@ def plan_tests(
             ["/bin/sh", "-c", "dd if=/dev/zero of=/tmp/big bs=1M count=200"],
             assertion={
                 "id": "P6",
-                "required_controls": ["memory_limit", "pids_limit"],
+                "required_controls": ["memory_limit", "pids_limit", "cpu_limit"],
                 "expect": {
-                    "exit_code_in": [1, 137, 139, 143, 124],
-                    "required_limit_dimensions": ["memory", "pids", "wall_clock"],
+                    "exit_code_in": [0, 1, 137, 139, 143, 124],
+                    "required_limit_dimensions": ["memory", "pids", "wall_clock", "cpu"],
                 },
                 "notes": [
-                    "CPU quota is recorded as NOT_TESTED unless separately attributed.",
+                    "CPU PASS requires container-scoped cpu.max matching --cpus=0.50",
+                    "and attributable nr_throttled/throttled_usec growth under load.",
+                    "Missing/deleted cgroup yields NOT_TESTED (never PASS).",
                     "Arbitrary nonzero exits are not memory/PID proof.",
                 ],
             },
             memory="32m",
-            cpus="0.20",
+            cpus="0.50",
             pids=32,
-            host_timeout_seconds=20,
+            host_timeout_seconds=45,
         )),
         ("P7", lambda: entry(
             "P7",
@@ -817,6 +868,448 @@ def _force_remove_container(name: str) -> dict[str, Any]:
         "forced": True,
         "rc": rc.returncode,
         "stderr": sanitize_evidence_text(rc.stderr or "")[:500],
+    }
+
+
+def _podman_inspect_object(name: str) -> dict[str, Any]:
+    """Return the first inspect object for a container, or an error envelope."""
+    try:
+        rc = subprocess.run(
+            ["podman", "inspect", name, "--format", "json"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+            env=_host_podman_env(),
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {"ok": False, "error": type(exc).__name__}
+    if rc.returncode != 0:
+        return {
+            "ok": False,
+            "error": "inspect_rc_nonzero",
+            "rc": rc.returncode,
+            "stderr": sanitize_evidence_text(rc.stderr or ""),
+        }
+    try:
+        data = json.loads(rc.stdout)
+    except json.JSONDecodeError:
+        return {"ok": False, "error": "inspect_json_decode_failed"}
+    if isinstance(data, list):
+        if not data:
+            return {"ok": False, "error": "empty_inspect_list"}
+        data = data[0]
+    if not isinstance(data, dict):
+        return {"ok": False, "error": "inspect_payload_not_object"}
+    return {"ok": True, "object": data}
+
+
+def _read_cgroup_file(cgroup_dir: Path, name: str) -> dict[str, Any]:
+    path = cgroup_dir / name
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except FileNotFoundError:
+        return {"ok": False, "error": "cgroup_file_missing", "path": name}
+    except OSError as exc:
+        return {"ok": False, "error": type(exc).__name__, "path": name}
+    return {"ok": True, "text": text, "path": str(path)}
+
+
+def locate_container_cgroup_dir(
+    *,
+    container_id: str | None,
+    cgroup_path_hint: str | None,
+) -> dict[str, Any]:
+    """Resolve the container's own cgroup v2 directory (never an ancestor substitute)."""
+    candidates: list[Path] = []
+    hint = (cgroup_path_hint or "").strip()
+    if hint:
+        if hint.startswith("/sys/fs/cgroup"):
+            candidates.append(Path(hint))
+        elif hint.startswith("/"):
+            candidates.append(Path("/sys/fs/cgroup") / hint.lstrip("/"))
+            candidates.append(Path(hint))
+        else:
+            candidates.append(Path("/sys/fs/cgroup") / hint)
+
+    cid = (container_id or "").strip().lower()
+    if cid:
+        short = cid[:12]
+        roots = [Path("/sys/fs/cgroup")]
+        # Prefer scoped search under the current user slice when present.
+        uid = os.getuid()
+        user_slice = Path(f"/sys/fs/cgroup/user.slice/user-{uid}.slice")
+        if user_slice.is_dir():
+            roots.insert(0, user_slice)
+        for root in roots:
+            try:
+                for match in root.rglob(f"libpod-{cid}.scope"):
+                    candidates.append(match)
+                    break
+                for match in root.rglob(f"libpod-{short}*.scope"):
+                    candidates.append(match)
+                    break
+            except OSError:
+                continue
+
+    def _is_container_scope(path: Path) -> bool:
+        name = path.name
+        # Reject well-known ancestor / system nodes even if they expose cpu.*.
+        banned = {
+            "cgroup",
+            "user.slice",
+            f"user-{os.getuid()}.slice",
+            "system.slice",
+            "init.scope",
+            "payload",
+        }
+        if name in banned or name.startswith("user@") and name.endswith(".service"):
+            return False
+        if cid:
+            # When the container id is known, only accept the matching libpod scope.
+            return name == f"libpod-{cid}.scope" or (
+                name.startswith(f"libpod-{cid[:12]}") and name.endswith(".scope")
+            )
+        # Without an id, still require a libpod scope leaf (never a slice/service).
+        return name.startswith("libpod-") and name.endswith(".scope")
+
+    seen: set[str] = set()
+    for cand in candidates:
+        key = str(cand)
+        if key in seen:
+            continue
+        seen.add(key)
+        if not cand.is_dir():
+            continue
+        # Require container-local cpu controller files.
+        if not (cand / "cpu.max").is_file() or not (cand / "cpu.stat").is_file():
+            continue
+        if not _is_container_scope(cand):
+            continue
+        return {
+            "ok": True,
+            "path": str(cand),
+            "linked_container_id": cid or None,
+            "hint": hint or None,
+        }
+    return {
+        "ok": False,
+        "error": "container_cgroup_not_found",
+        "hint": hint or None,
+        "container_id": cid or None,
+    }
+
+
+def _sample_container_cpu_cgroup(name: str) -> dict[str, Any]:
+    """Inspect a live container and sample its cgroup cpu.max / cpu.stat."""
+    inspected = _podman_inspect_object(name)
+    if not inspected.get("ok"):
+        return {
+            "ok": False,
+            "error": inspected.get("error") or "inspect_failed",
+            "cgroup": None,
+        }
+    obj = inspected["object"]
+    state = obj.get("State") if isinstance(obj.get("State"), dict) else {}
+    container_id = str(obj.get("Id") or state.get("Cid") or "")
+    cgroup_hint = str(state.get("CgroupPath") or obj.get("CgroupPath") or "")
+    located = locate_container_cgroup_dir(
+        container_id=container_id,
+        cgroup_path_hint=cgroup_hint,
+    )
+    if not located.get("ok"):
+        return {
+            "ok": False,
+            "error": located.get("error") or "cgroup_unresolved",
+            "container_id": container_id,
+            "cgroup_path_hint": cgroup_hint,
+            "cgroup": located,
+        }
+    cgroup_dir = Path(str(located["path"]))
+    cpu_max_raw = _read_cgroup_file(cgroup_dir, "cpu.max")
+    cpu_stat_raw = _read_cgroup_file(cgroup_dir, "cpu.stat")
+    if not cpu_max_raw.get("ok") or not cpu_stat_raw.get("ok"):
+        return {
+            "ok": False,
+            "error": "cgroup_files_unreadable",
+            "container_id": container_id,
+            "cgroup": located,
+            "cpu_max_raw": cpu_max_raw,
+            "cpu_stat_raw": cpu_stat_raw,
+        }
+    return {
+        "ok": True,
+        "container_name": name,
+        "container_id": container_id,
+        "cgroup": located,
+        "cpu_max": parse_cpu_max(cpu_max_raw["text"]),
+        "cpu_stat": parse_cpu_stat(cpu_stat_raw["text"]),
+        "cpu_max_text": sanitize_evidence_text(cpu_max_raw["text"]),
+        "cpu_stat_text": sanitize_evidence_text(cpu_stat_raw["text"]),
+    }
+
+
+def _run_cpu_quota_probe(
+    *,
+    image: str,
+    workspace: Path,
+    started_names: list[str],
+    configured_cpus: float = 0.50,
+) -> dict[str, Any]:
+    """Run a live CPU stress container and attribute quota + throttling."""
+    name = _unique_name("p6c")
+    started_names.append(name)
+    cmd, planned = build_command(
+        "podman",
+        image=image,
+        workspace=workspace,
+        memory="128m",
+        cpus=f"{configured_cpus:.2f}",
+        pids=64,
+        tmpfs_size="64m",
+        inner_command=["/bin/sh", "-c", _inner_p6_cpu()],
+        name=name,
+        rm=False,
+    )
+    started = time.monotonic()
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=_host_podman_env(),
+            start_new_session=True,
+        )
+    except OSError as exc:
+        return {
+            "dim": "cpu",
+            "ok": False,
+            "cpu_attribution": "launch_failed",
+            "error": type(exc).__name__,
+            "limit_ok": False,
+            "cpu_attributed": False,
+            "planned_controls": planned,
+            "sanitized_command": sanitize_command(cmd, workspace),
+        }
+
+    sample_before: dict[str, Any] | None = None
+    sample_after: dict[str, Any] | None = None
+    timed_out = False
+    stdout = ""
+    stderr = ""
+    exit_code = 1
+
+    try:
+        # Wait until the container is present, then sample cgroup before/during load.
+        for _ in range(50):
+            presence = _podman_presence(name)
+            if presence.get("state") == "present":
+                sample_before = _sample_container_cpu_cgroup(name)
+                break
+            if proc.poll() is not None:
+                break
+            time.sleep(0.1)
+
+        # Allow the busy-loop interval to accumulate throttle counters.
+        time.sleep(4.0)
+        if _podman_presence(name).get("state") == "present":
+            sample_after = _sample_container_cpu_cgroup(name)
+
+        try:
+            stdout, stderr = proc.communicate(timeout=20)
+            exit_code = int(proc.returncode if proc.returncode is not None else 1)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except OSError:
+                proc.kill()
+            try:
+                stdout, stderr = proc.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                stdout, stderr = "", "communicate_timeout_after_kill"
+            exit_code = 124
+    finally:
+        presence_now = _podman_presence(name)
+        force_result = None
+        if presence_now.get("state") in {"present", "inspect_error"}:
+            force_result = _force_remove_container(name)
+        presence_after = _podman_presence(name)
+
+    inspect_controls = {}
+    inspect_ok = False
+    if sample_before and sample_before.get("ok"):
+        # Re-use controls from a final inspect attempt if container lingered.
+        pass
+    # Controls: parse from planned argv + optional inspect while alive was embedded.
+    argv_probe = scan_argv_safety(cmd, workspace=workspace)
+
+    cpu_max = (sample_after or sample_before or {}).get("cpu_max") or {}
+    before_stat = (sample_before or {}).get("cpu_stat") or {"ok": False}
+    after_stat = (sample_after or {}).get("cpu_stat") or {"ok": False}
+    delta = cpu_stat_delta(before_stat, after_stat)
+
+    quota_ok = cpu_quota_matches_configured(cpu_max, configured_cpus=configured_cpus)
+    throttle_ok = cpu_throttling_attributed(delta)
+    cgroup_ok = bool((sample_before or {}).get("ok")) and bool((sample_after or {}).get("ok"))
+
+    if not cgroup_ok:
+        attribution = "cgroup_unavailable"
+        attributed = False
+        limit_value: Any = "NOT_TESTED"
+    elif cpu_max.get("unlimited"):
+        attribution = "unlimited_cpu_max"
+        attributed = False
+        limit_value = False
+    elif not quota_ok:
+        attribution = "quota_mismatch_or_unreadable"
+        attributed = False
+        limit_value = False
+    elif not throttle_ok:
+        attribution = "quota_observed_without_throttle"
+        attributed = False
+        limit_value = "NOT_TESTED"
+    else:
+        attribution = "quota_and_throttle"
+        attributed = True
+        limit_value = True
+
+    # Prefer runtime inspect controls from sample metadata via a dedicated inspect
+    # while present; if already removed, fall back to argv-only (not for PASS).
+    if sample_after and sample_after.get("ok"):
+        # Container may still exist briefly; try inspect for control booleans.
+        if _podman_presence(name).get("state") == "present":
+            parsed = _podman_inspect_runtime(name)
+            if parsed.get("ok"):
+                inspect_controls = parsed.get("runtime_inspected_controls") or {}
+                inspect_ok = True
+
+    return {
+        "dim": "cpu",
+        "ok": attributed,
+        "exit_code": exit_code,
+        "timed_out": timed_out,
+        "duration_seconds": round(time.monotonic() - started, 3),
+        "configured_cpus": configured_cpus,
+        "cpu_max": cpu_max,
+        "cpu_stat_before": before_stat,
+        "cpu_stat_after": after_stat,
+        "cpu_stat_delta": delta,
+        "sample_before_ok": bool((sample_before or {}).get("ok")),
+        "sample_after_ok": bool((sample_after or {}).get("ok")),
+        "cgroup": (sample_after or sample_before or {}).get("cgroup"),
+        "container_id": (sample_after or sample_before or {}).get("container_id"),
+        "container_name": name,
+        "cpu_attribution": attribution,
+        "cpu_attributed": attributed,
+        "limit_ok": limit_value,
+        "quota_ok": quota_ok,
+        "throttle_ok": throttle_ok,
+        "stdout": sanitize_evidence_text(stdout or ""),
+        "stderr": sanitize_evidence_text(stderr or ""),
+        "planned_controls": planned,
+        "launcher_argv_controls": argv_probe.get("launcher_argv_controls") or {},
+        "runtime_inspected_controls": inspect_controls,
+        "inspect_ok": inspect_ok,
+        "cleanup_absent": presence_after.get("state") == "absent",
+        "force_cleanup": force_result,
+        "sanitized_command": sanitize_command(cmd, workspace),
+    }
+
+
+def _parse_marker_block(stdout: str, start: str, end: str) -> str:
+    pattern = rf"{re.escape(start)}\n(.*?){re.escape(end)}"
+    match = re.search(pattern, stdout, re.S)
+    return match.group(1).strip() if match else ""
+
+
+def _execute_security_identity_probe(
+    *,
+    image: str,
+    workspace: Path,
+    started_names: list[str],
+    host_uid: int,
+    host_gid: int,
+) -> dict[str, Any]:
+    """Synthetic probe for Cap* sets and keep-id userns mapping."""
+    name = _unique_name("secid")
+    marker_name = "security-identity-marker.txt"
+    marker_path = workspace / marker_name
+    if marker_path.exists():
+        marker_path.unlink()
+
+    raw = _run_inspectable(
+        image=image,
+        workspace=workspace,
+        inner=["/bin/sh", "-c", _inner_security_identity()],
+        name=name,
+        timeout=20,
+        memory="128m",
+        cpus="0.50",
+        pids=64,
+        rm=False,
+        started_names=started_names,
+    )
+    stdout = raw.get("stdout") or ""
+    uid_match = re.search(r"(?m)^CONTAINER_UID=(\d+)$", stdout)
+    gid_match = re.search(r"(?m)^CONTAINER_GID=(\d+)$", stdout)
+    uid_map_text = _parse_marker_block(stdout, "---UID_MAP---", "---GID_MAP---")
+    # GID map ends at STATUS_CAPS marker.
+    gid_map_text = _parse_marker_block(stdout, "---GID_MAP---", "---STATUS_CAPS---")
+    caps_text = _parse_marker_block(stdout, "---STATUS_CAPS---", "---END_STATUS_CAPS---")
+
+    caps_parsed = parse_proc_status_capabilities(caps_text)
+    cap_verdict = capability_drop_all_attributed(caps_parsed)
+
+    uid_map = parse_id_map(uid_map_text)
+    gid_map = parse_id_map(gid_map_text)
+    workspace_owner = workspace.stat().st_uid if workspace.exists() else None
+    marker_owner = marker_path.stat().st_uid if marker_path.is_file() else None
+    container_uid = int(uid_match.group(1)) if uid_match else None
+    container_gid = int(gid_match.group(1)) if gid_match else None
+
+    userns_evidence = {
+        "container_uid": container_uid,
+        "container_gid": container_gid,
+        "host_uid": host_uid,
+        "host_gid": host_gid,
+        "uid_map": uid_map,
+        "gid_map": gid_map,
+        "workspace_owner_uid": workspace_owner,
+        "marker_owner_uid": marker_owner,
+        "userns_inode": (
+            re.search(r"(?m)^USERNS_INODE=(\S+)$", stdout).group(1)
+            if re.search(r"(?m)^USERNS_INODE=(\S+)$", stdout)
+            else None
+        ),
+        "marker_written": bool(marker_path.is_file()),
+    }
+    userns_verdict = userns_keep_id_attributed(userns_evidence)
+
+    after = (raw.get("cleanup_meta") or {}).get("presence_after_cleanup") or {}
+    return {
+        "probe": "security_identity",
+        "exit_code": raw.get("exit_code"),
+        "stdout": sanitize_evidence_text(stdout),
+        "stderr": raw.get("stderr"),
+        "capability": {
+            "parsed": caps_parsed,
+            "verdict": cap_verdict,
+        },
+        "userns": {
+            "evidence": {
+                **{k: v for k, v in userns_evidence.items() if k not in {"uid_map", "gid_map"}},
+                "uid_map": uid_map,
+                "gid_map": gid_map,
+            },
+            "verdict": userns_verdict,
+        },
+        "runtime_inspected_controls": raw.get("runtime_inspected_controls") or {},
+        "inspect_ok": raw.get("inspect_ok"),
+        "cleanup_observed": after.get("state") == "absent",
+        "sanitized_command": raw.get("sanitized_command"),
+        "evidence_layers": raw.get("evidence_layers"),
     }
 
 
@@ -1156,6 +1649,43 @@ def _execute_p6(
         }
     )
 
+    # CPU: container-scoped cpu.max + behavioral throttling under load.
+    cpu_raw = _run_cpu_quota_probe(
+        image=image,
+        workspace=alpha,
+        started_names=started_names,
+        configured_cpus=0.50,
+    )
+    dimensions["cpu"] = cpu_raw.get("limit_ok")
+    sub_results.append(
+        {
+            "dim": "cpu",
+            "exit_code": cpu_raw.get("exit_code"),
+            "timed_out": cpu_raw.get("timed_out"),
+            "cpu_attribution": cpu_raw.get("cpu_attribution"),
+            "configured_cpus": cpu_raw.get("configured_cpus"),
+            "quota_ok": cpu_raw.get("quota_ok"),
+            "throttle_ok": cpu_raw.get("throttle_ok"),
+            "cpu_max": cpu_raw.get("cpu_max"),
+            "cpu_stat_delta": cpu_raw.get("cpu_stat_delta"),
+            "cgroup": cpu_raw.get("cgroup"),
+            "container_id": cpu_raw.get("container_id"),
+            "cleanup_absent": cpu_raw.get("cleanup_absent"),
+            "sample_before_ok": cpu_raw.get("sample_before_ok"),
+            "sample_after_ok": cpu_raw.get("sample_after_ok"),
+        }
+    )
+
+    # Supporting security identity probe (capabilities + keep-id maps).
+    policy = resolve_uid_policy(runtime="podman")
+    security_raw = _execute_security_identity_probe(
+        image=image,
+        workspace=alpha,
+        started_names=started_names,
+        host_uid=int(policy["host_uid"]),
+        host_gid=int(policy["host_gid"]),
+    )
+
     # Prefer memory run inspect for control evidence (limits configured).
     evidence = {
         "evidence_layers": mem_raw.get("evidence_layers"),
@@ -1177,10 +1707,20 @@ def _execute_p6(
         evidence["controls_provenance"] = pids_raw.get("controls_provenance")
         evidence["inspect_ok"] = True
         evidence["independent_control_probe"] = True
+    # Ensure cpu_limit appears in inspected controls when memory inspect saw it.
+    if evidence.get("runtime_inspected_controls") is not None:
+        # cpu_limit may already be true from NanoCpus; leave as-is.
+        pass
 
     overall_exit = mem_raw.get("exit_code")
     if dimensions["wall_clock"]:
         overall_exit = 124
+    # CPU subprobe success (exit 0) must not override attributable failures.
+    if dimensions.get("cpu") is True and overall_exit not in {1, 137, 139, 143, 124}:
+        overall_exit = 0
+
+    cpu_cleanup_ok = bool(cpu_raw.get("cleanup_absent"))
+    security_cleanup_ok = bool(security_raw.get("cleanup_observed"))
 
     return {
         **evidence,
@@ -1196,7 +1736,29 @@ def _execute_p6(
         "memory_attributed": bool(dimensions["memory"]),
         "pids_attributed": bool(dimensions["pids"]),
         "wall_clock_attributed": bool(dimensions["wall_clock"]) and wall_cleanup_ok,
-        "cleanup_observed": wall_cleanup_ok,
+        "cpu_attributed": bool(dimensions.get("cpu") is True),
+        "cpu_attribution": cpu_raw.get("cpu_attribution"),
+        "cpu_evidence": {
+            "configured_cpus": cpu_raw.get("configured_cpus"),
+            "cpu_max": cpu_raw.get("cpu_max"),
+            "cpu_stat_before": cpu_raw.get("cpu_stat_before"),
+            "cpu_stat_after": cpu_raw.get("cpu_stat_after"),
+            "cpu_stat_delta": cpu_raw.get("cpu_stat_delta"),
+            "cgroup": cpu_raw.get("cgroup"),
+            "container_id": cpu_raw.get("container_id"),
+            "container_name": cpu_raw.get("container_name"),
+            "quota_ok": cpu_raw.get("quota_ok"),
+            "throttle_ok": cpu_raw.get("throttle_ok"),
+            "attribution": cpu_raw.get("cpu_attribution"),
+        },
+        "capability_evidence": security_raw.get("capability"),
+        "userns_evidence": security_raw.get("userns"),
+        "security_identity_probe": {
+            "exit_code": security_raw.get("exit_code"),
+            "cleanup_observed": security_cleanup_ok,
+            "sanitized_command": security_raw.get("sanitized_command"),
+        },
+        "cleanup_observed": wall_cleanup_ok and cpu_cleanup_ok and security_cleanup_ok,
         "cleanup_source": "p6_forced_cleanup_after_subprobes",
         "oom_killed": mem_raw.get("oom_killed"),
     }
@@ -1412,6 +1974,12 @@ def run_execute(
                         "memory_attributed": raw.get("memory_attributed"),
                         "pids_attributed": raw.get("pids_attributed"),
                         "wall_clock_attributed": raw.get("wall_clock_attributed"),
+                        "cpu_attributed": raw.get("cpu_attributed"),
+                        "cpu_attribution": raw.get("cpu_attribution"),
+                        "cpu_evidence": raw.get("cpu_evidence"),
+                        "capability_evidence": raw.get("capability_evidence"),
+                        "userns_evidence": raw.get("userns_evidence"),
+                        "security_identity_probe": raw.get("security_identity_probe"),
                         "cleanup_observed": raw.get("cleanup_observed"),
                         "cleanup_source": raw.get("cleanup_source"),
                         "cleanup_meta": raw.get("cleanup_meta"),
@@ -1429,14 +1997,38 @@ def run_execute(
         if created:
             cleanup_fixture_tree(fixture_root)
 
+    security_controls: dict[str, Any] = {
+        "cap_drop_all": {"status": "NOT_TESTED"},
+        "userns_keep_id": {"status": "NOT_TESTED"},
+    }
+    for row in results:
+        if row.get("id") != "P6":
+            continue
+        ev = row.get("evidence") or {}
+        cap = (ev.get("capability_evidence") or {}).get("verdict") or {}
+        userns = (ev.get("userns_evidence") or {}).get("verdict") or {}
+        if cap:
+            security_controls["cap_drop_all"] = {
+                "status": cap.get("status") or "NOT_TESTED",
+                "reason": cap.get("reason"),
+                "attributed": cap.get("attributed"),
+            }
+        if userns:
+            security_controls["userns_keep_id"] = {
+                "status": userns.get("status") or "NOT_TESTED",
+                "reason": userns.get("reason"),
+                "attributed": userns.get("attributed"),
+            }
+
     return {
-        "phase": "B1",
+        "phase": "B2",
         "runtime": "podman",
         "image": image,
         "uid_policy": policy,
         "canary_sha256_initial": digests,
         "p1_p8_status": status_map,
         "results": results,
+        "security_controls": security_controls,
         "leftover_cleanup": leftover,
         "execution_performed": True,
     }
@@ -1494,7 +2086,7 @@ def main() -> int:
     uid_policy = resolve_uid_policy(runtime="podman")
 
     summary: dict[str, Any] = {
-        "phase": "B1",
+        "phase": "B2",
         "runtime": runtime,
         "runtime_reason": reason,
         "image": image,
@@ -1503,6 +2095,10 @@ def main() -> int:
         "uid_policy": uid_policy,
         "tests": [],
         "p1_p8_status": {tid: "NOT_TESTED" for tid in ALLOWED_TEST_IDS},
+        "security_controls": {
+            "cap_drop_all": {"status": "NOT_TESTED"},
+            "userns_keep_id": {"status": "NOT_TESTED"},
+        },
         "execution_barrier": (
             "owner_gate_ready_but_not_invoked"
             if not execute_authorized
@@ -1584,7 +2180,7 @@ def main() -> int:
     if args.json:
         print(json.dumps(summary, indent=2, sort_keys=True))
     else:
-        print("Engineering OS sandbox PoC launcher (Phase B1 harness; dry-run)")
+        print("Engineering OS sandbox PoC launcher (Phase B2 harness; dry-run)")
         print(f"runtime={runtime} reason={reason}")
         print(f"image={image}")
         print(

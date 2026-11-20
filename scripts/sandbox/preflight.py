@@ -295,9 +295,14 @@ def assess() -> dict[str, Any]:
     cgroup_controllers = Path("/sys/fs/cgroup/cgroup.controllers")
     report["linux_capabilities"]["cgroup_v2"] = cgroup_controllers.exists()
     if cgroup_controllers.exists():
-        report["linux_capabilities"]["cgroup_controllers"] = (
+        controllers = (
             cgroup_controllers.read_text(encoding="utf-8", errors="ignore").strip().split()
         )
+        report["linux_capabilities"]["cgroup_controllers"] = controllers
+        # Indicator only — does not prove container isolation or CPU enforcement.
+        report["linux_capabilities"]["cgroup_cpu_controller_visible"] = "cpu" in controllers
+    else:
+        report["linux_capabilities"]["cgroup_cpu_controller_visible"] = False
 
     # Runtime-specific image stores (no cross-credit)
     if podman["binary_available"]:

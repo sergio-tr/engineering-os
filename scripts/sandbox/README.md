@@ -1,4 +1,4 @@
-# Sandbox PoC harness (M03-01 Phase B1)
+# Sandbox PoC harness (M03-01 Phase B2)
 
 Synthetic, fail-closed isolation harness for Engineering OS.
 
@@ -7,7 +7,7 @@ Synthetic, fail-closed isolation harness for Engineering OS.
 1. **Launcher configuration** — planned flags (intent).
 2. **Executed argv** — safety-scanned subprocess arguments (**not** enforcement proof).
 3. **Runtime inspect** — read-only `podman inspect` of the started container.
-4. **Behavioral evidence** — probe markers, canaries, attributable limit/cleanup signals.
+4. **Behavioral evidence** — probe markers, canaries, attributable limit/cleanup/CPU/capability/userns signals.
 
 Do not treat argv scans as independently observed runtime enforcement.
 
@@ -32,7 +32,7 @@ Safe dry-run / unit checks:
 ```bash
 python3 -B scripts/sandbox/assertions.py
 python3 -B scripts/sandbox/preflight.py
-python3 -B scripts/sandbox/run_poc.py --json
+python3 -B scripts/sandbox/run_poc.py --tests P6 --json
 ```
 
 Owner-only execute (later; launches containers):
@@ -42,17 +42,20 @@ python3 -B scripts/sandbox/run_poc.py \
   --execute \
   --allow-phase-b \
   --owner-authorize-runtime-execution \
-  --tests P1,P2,P3,P4,P5,P6,P7,P8 \
+  --tests P6 \
   --json
 ```
+
+Recommended Owner B2 closure run is **P6 only** (CPU + capability + userns probes). Prior P1–P5/P7/P8 PASS evidence should be retained separately.
 
 ## Assertion highlights
 
 - P2–P4: container emits `CONTAINER_PATH_KIND=...`; host canary hashes; generic failures without probe markers cannot PASS
 - P5: IP/DNS must be `executed_denied`; `unavailable` fails
-- P6: attributable memory/PIDs/wall-clock; CPU may be `NOT_TESTED`
+- P6: attributable memory/PIDs/wall-clock **and** CPU (`cpu.max` + throttle delta on the container cgroup); missing CPU cannot PASS
+- P6 also collects `capability_evidence` and `userns_evidence` (process Cap* sets and uid/gid maps)
 - P7: presence checks; inspect errors are not absence; auto vs forced cleanup recorded
 
 ## Status
 
-P1–P8 and SANDBOX remain **NOT_TESTED** until Owner-authorized execute evidence is reviewed.
+M03-01 remains **PLANNED**. SANDBOX remains **NOT_TESTED** until Owner-authorized B2 evidence is reviewed and M03-02 audit completes.
