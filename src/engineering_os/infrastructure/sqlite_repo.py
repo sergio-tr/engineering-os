@@ -160,6 +160,38 @@ CREATE TABLE IF NOT EXISTS github_observations (
 
 CREATE INDEX IF NOT EXISTS idx_gh_obs_project ON github_observations(project_id, observed_at);
 CREATE INDEX IF NOT EXISTS idx_pr_links_project ON execution_pr_links(project_id);
+
+CREATE TABLE IF NOT EXISTS external_identity_mappings (
+  mapping_id TEXT PRIMARY KEY,
+  system_name TEXT NOT NULL,
+  company_id TEXT,
+  local_kind TEXT NOT NULL,
+  local_id TEXT NOT NULL,
+  external_id TEXT NOT NULL,
+  external_revision TEXT,
+  correlation_id TEXT,
+  last_sync_at TEXT,
+  evidence_class TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(system_name, local_kind, local_id),
+  UNIQUE(system_name, company_id, local_kind, external_id)
+);
+
+CREATE TABLE IF NOT EXISTS integration_observations (
+  observation_id TEXT PRIMARY KEY,
+  system_name TEXT NOT NULL,
+  project_id TEXT,
+  company_id TEXT,
+  evidence_class TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  observed_at TEXT NOT NULL,
+  stale INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_ext_map_local ON external_identity_mappings(system_name, local_kind, local_id);
+CREATE INDEX IF NOT EXISTS idx_int_obs_system ON integration_observations(system_name, observed_at);
 """
 
 
@@ -842,6 +874,182 @@ class Repository:
             (project_id, limit),
         )
         return [self._row_github_observation(r) for r in rows]
+
+    def upsert_external_mapping(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        now = utc_now()
+        with self.transaction() as conn:
+            conn.execute(
+                """
+                INSERT INTO external_identity_mappings(
+                  mapping_id, system_name, company_id, local_kind, local_id,
+                  external_id, external_revision, correlation_id, last_sync_at,
+                  evidence_class, payload_json, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(system_name, local_kind, local_id) DO UPDATE SET
+                  company_id=excluded.company_id,
+                  external_id=excluded.external_id,
+                  external_revision=excluded.external_revision,
+                  correlation_id=excluded.correlation_id,
+                  last_sync_at=excluded.last_sync_at,
+                  evidence_class=excluded.evidence_class,
+                  payload_json=excluded.payload_json,
+                  updated_at=excluded.updated_at
+                """,
+                (
+                    data.get("mapping_id") or data["local_id"],
+                    data["system_name"],
+                    data.get("company_id"),
+                    data["local_kind"],
+                    data["local_id"],
+                    data["external_id"],
+                    data.get("external_revision"),
+                    data.get("correlation_id"),
+                    data.get("last_sync_at") or now,
+                    data["evidence_class"],
+                    dumps_json(data.get("payload") or {}),
+                    data.get("created_at") or now,
+                    now,
+                ),
+            )
+        return self.get_external_mapping(
+            data["system_name"], data["local_kind"], data["local_id"]
+        )  # type: ignore[return-value]
+
+    def get_external_mapping(
+        self, system_name: str, local_kind: str, local_id: str
+    ) -> Optional[Dict[str, Any]]:
+        row = self._fetchone(
+            """
+            SELECT * FROM external_identity_mappings
+            WHERE system_name=? AND local_kind=? AND local_id=?
+            """,
+            (system_name, local_kind, local_id),
+        )
+        return self._row_external_mapping(row) if row else None
+
+    def list_external_mappings(
+        self,
+        *,
+        system_name: Optional[str] = None,
+        company_id: Optional[str] = None,
+        local_kind: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        clauses: List[str] = []
+        params: List[Any] = []
+        if system_name:
+            clauses.append("system_name = ?")
+            params.append(system_name)
+        if company_id:
+            clauses.append("company_id = ?")
+            params.append(company_id)
+        if local_kind:
+            clauses.append("local_kind = ?")
+            params.append(local_kind)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        rows = self._fetchall(
+            f"SELECT * FROM external_identity_mappings {where} ORDER BY updated_at DESC",
+            params,
+        )
+        return [self._row_external_mapping(r) for r in rows]
+
+    def insert_integration_observation(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        with self.transaction() as conn:
+            conn.execute(
+                """
+                UPDATE integration_observations SET stale=1
+                WHERE system_name=? AND IFNULL(project_id,'')=IFNULL(?, '')
+                  AND IFNULL(company_id,'')=IFNULL(?, '') AND stale=0
+                """,
+                (
+                    data["system_name"],
+                    data.get("project_id"),
+                    data.get("company_id"),
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO integration_observations(
+                  observation_id, system_name, project_id, company_id,
+                  evidence_class, payload_json, observed_at, stale
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 0)
+                """,
+                (
+                    data["observation_id"],
+                    data["system_name"],
+                    data.get("project_id"),
+                    data.get("company_id"),
+                    data["evidence_class"],
+                    dumps_json(data.get("payload") or {}),
+                    data.get("observed_at") or utc_now(),
+                ),
+            )
+        return self.get_integration_observation(data["observation_id"])  # type: ignore[return-value]
+
+    def get_integration_observation(
+        self, observation_id: str
+    ) -> Optional[Dict[str, Any]]:
+        row = self._fetchone(
+            "SELECT * FROM integration_observations WHERE observation_id=?",
+            (observation_id,),
+        )
+        return self._row_integration_observation(row) if row else None
+
+    def latest_integration_observation(
+        self,
+        *,
+        system_name: str,
+        project_id: Optional[str] = None,
+        company_id: Optional[str] = None,
+        include_stale: bool = False,
+    ) -> Optional[Dict[str, Any]]:
+        clauses = ["system_name = ?"]
+        params: List[Any] = [system_name]
+        if project_id is not None:
+            clauses.append("project_id = ?")
+            params.append(project_id)
+        if company_id is not None:
+            clauses.append("company_id = ?")
+            params.append(company_id)
+        if not include_stale:
+            clauses.append("stale = 0")
+        row = self._fetchone(
+            f"""
+            SELECT * FROM integration_observations
+            WHERE {' AND '.join(clauses)}
+            ORDER BY observed_at DESC LIMIT 1
+            """,
+            params,
+        )
+        return self._row_integration_observation(row) if row else None
+
+    def _row_external_mapping(self, row: sqlite3.Row) -> Dict[str, Any]:
+        return {
+            "mapping_id": row["mapping_id"],
+            "system_name": row["system_name"],
+            "company_id": row["company_id"],
+            "local_kind": row["local_kind"],
+            "local_id": row["local_id"],
+            "external_id": row["external_id"],
+            "external_revision": row["external_revision"],
+            "correlation_id": row["correlation_id"],
+            "last_sync_at": row["last_sync_at"],
+            "evidence_class": row["evidence_class"],
+            "payload": dict(loads_json(row["payload_json"]) or {}),
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }
+
+    def _row_integration_observation(self, row: sqlite3.Row) -> Dict[str, Any]:
+        return {
+            "observation_id": row["observation_id"],
+            "system_name": row["system_name"],
+            "project_id": row["project_id"],
+            "company_id": row["company_id"],
+            "evidence_class": row["evidence_class"],
+            "payload": dict(loads_json(row["payload_json"]) or {}),
+            "observed_at": row["observed_at"],
+            "stale": bool(row["stale"]),
+        }
 
     def _row_github_connection(self, row: sqlite3.Row) -> Dict[str, Any]:
         return {

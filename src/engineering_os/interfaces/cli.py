@@ -247,6 +247,144 @@ def cmd_serve(args: argparse.Namespace) -> int:
     return serve(host=args.host, port=args.port, db_path=args.db)
 
 
+def cmd_paperclip(args: argparse.Namespace) -> int:
+    plane = _plane(args.db)
+    try:
+        cmd = args.paperclip_cmd
+        if cmd == "status":
+            _print(plane.paperclip_status(args.company_id))
+            return 0
+        if cmd == "sync":
+            _print(
+                plane.paperclip_sync(args.company_id, project_id=args.project_id)
+            )
+            return 0
+        if cmd == "agents":
+            _print(plane.paperclip_list_agents(args.company_id))
+            return 0
+        if cmd == "issues":
+            _print(plane.paperclip_list_issues(args.company_id))
+            return 0
+        if cmd == "link-project":
+            _print(
+                plane.paperclip_link_project(
+                    args.local_id, args.external_id, company_id=args.company_id
+                )
+            )
+            return 0
+        if cmd == "create-issue":
+            apply = bool(args.apply)
+            _print(
+                plane.paperclip_create_issue(
+                    args.company_id,
+                    {"title": args.title},
+                    apply=apply,
+                )
+            )
+            return 0
+        return 2
+    finally:
+        plane.close()
+
+
+def cmd_openclaw(args: argparse.Namespace) -> int:
+    plane = _plane(args.db)
+    try:
+        cmd = args.openclaw_cmd
+        if cmd == "status":
+            _print(plane.openclaw_status())
+            return 0
+        if cmd == "refresh":
+            _print(plane.openclaw_refresh())
+            return 0
+        if cmd == "gateway-check":
+            refreshed = plane.openclaw_refresh()
+            _print(
+                {
+                    "gateway": refreshed["status"].get("gateway"),
+                    "gateway_transport": refreshed["status"].get("gateway_transport"),
+                    "evidence_class": refreshed["status"].get("evidence_class"),
+                }
+            )
+            return 0
+        return 2
+    finally:
+        plane.close()
+
+
+def cmd_integrations(args: argparse.Namespace) -> int:
+    if args.integrations_cmd == "demo-fixture":
+        import tempfile
+
+        from engineering_os.infrastructure.eos05_fixtures import (
+            build_paperclip_fixture_transport,
+            openclaw_fixture_runner,
+        )
+        from engineering_os.infrastructure.openclaw_client import OpenClawCliClient
+        from engineering_os.infrastructure.sqlite_repo import Repository
+
+        path = Path(args.db) if args.db else default_db_path()
+        if args.temp:
+            path = Path(tempfile.mkdtemp(prefix="eos05-")) / "demo.sqlite3"
+        plane = ControlPlane(
+            Repository(path),
+            paperclip_transport=build_paperclip_fixture_transport(),
+            openclaw_client=OpenClawCliClient(
+                runner=openclaw_fixture_runner, which=lambda _: "/usr/bin/openclaw"
+            ),
+        )
+        try:
+            result = plane.run_eos05_fixture_demo()
+            project_id = result["project_id"]
+            plane.close()
+            plane2 = ControlPlane(
+                Repository(path),
+                paperclip_transport=build_paperclip_fixture_transport(),
+                openclaw_client=OpenClawCliClient(
+                    runner=openclaw_fixture_runner, which=lambda _: "/usr/bin/openclaw"
+                ),
+            )
+            try:
+                result["restart"] = {
+                    "mappings": plane2.repo.list_external_mappings(
+                        system_name="paperclip"
+                    ),
+                    "paperclip_obs": plane2.repo.latest_integration_observation(
+                        system_name="paperclip",
+                        project_id=project_id,
+                        include_stale=True,
+                    ),
+                    "openclaw_obs": plane2.repo.latest_integration_observation(
+                        system_name="openclaw", include_stale=True
+                    ),
+                    "plan": plane2.orchestration_plan(project_id),
+                }
+                result["db_path"] = str(path)
+                _print(result)
+                return 0
+            finally:
+                plane2.close()
+        except Exception:
+            plane.close()
+            raise
+
+    plane = _plane(args.db)
+    try:
+        _print(plane.integrations_status())
+        return 0
+    finally:
+        plane.close()
+
+
+def cmd_orchestration_plan(args: argparse.Namespace) -> int:
+    plane = _plane(args.db)
+    try:
+        _print(plane.orchestration_plan(args.project_id))
+        return 0
+    finally:
+        plane.close()
+
+
 def cmd_github(args: argparse.Namespace) -> int:
     plane = _plane(args.db)
     try:
@@ -476,6 +614,56 @@ def build_parser() -> argparse.ArgumentParser:
     c = gs.add_parser("demo-fixture", help="Offline fixture-based GitHub demo")
     c.add_argument("--temp", action="store_true")
     c.set_defaults(func=cmd_github)
+
+    p = sub.add_parser("paperclip", help="Paperclip organization integration (EOS-05)")
+    ps = p.add_subparsers(dest="paperclip_cmd", required=True)
+    c = ps.add_parser("status")
+    c.add_argument("--company-id", default=None)
+    c.set_defaults(func=cmd_paperclip)
+    c = ps.add_parser("sync")
+    c.add_argument("--company-id", required=True)
+    c.add_argument("--project-id", default=None)
+    c.set_defaults(func=cmd_paperclip)
+    c = ps.add_parser("agents")
+    c.add_argument("--company-id", required=True)
+    c.set_defaults(func=cmd_paperclip)
+    c = ps.add_parser("issues")
+    c.add_argument("--company-id", required=True)
+    c.set_defaults(func=cmd_paperclip)
+    c = ps.add_parser("link-project")
+    c.add_argument("local_id")
+    c.add_argument("external_id")
+    c.add_argument("--company-id", required=True)
+    c.set_defaults(func=cmd_paperclip)
+    c = ps.add_parser("create-issue")
+    c.add_argument("--company-id", required=True)
+    c.add_argument("--title", required=True)
+    c.add_argument("--dry-run", action="store_true", default=True)
+    c.add_argument("--apply", action="store_true")
+    c.set_defaults(func=cmd_paperclip)
+
+    p = sub.add_parser("openclaw", help="OpenClaw coordinator observation (EOS-05)")
+    os_ = p.add_subparsers(dest="openclaw_cmd", required=True)
+    c = os_.add_parser("status")
+    c.set_defaults(func=cmd_openclaw)
+    c = os_.add_parser("gateway-check")
+    c.set_defaults(func=cmd_openclaw)
+    c = os_.add_parser("refresh")
+    c.set_defaults(func=cmd_openclaw)
+
+    p = sub.add_parser("integrations", help="Integration overview")
+    iss = p.add_subparsers(dest="integrations_cmd", required=True)
+    c = iss.add_parser("status")
+    c.set_defaults(func=cmd_integrations)
+    c = iss.add_parser("demo-fixture")
+    c.add_argument("--temp", action="store_true")
+    c.set_defaults(func=cmd_integrations)
+
+    p = sub.add_parser("orchestration")
+    ors = p.add_subparsers(dest="orch_cmd", required=True)
+    c = ors.add_parser("plan")
+    c.add_argument("--project-id", required=True)
+    c.set_defaults(func=cmd_orchestration_plan)
 
     return parser
 

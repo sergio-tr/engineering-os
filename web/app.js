@@ -265,6 +265,7 @@
     selectedProjectId = projectId;
     $("goal-project-id").value = projectId;
     $("github-project-id").value = projectId;
+    if ($("paperclip-project-id")) $("paperclip-project-id").value = projectId;
     const detail = await api(`/api/projects/${encodeURIComponent(projectId)}`);
     const p = detail.project;
     $("project-detail").classList.remove("empty");
@@ -573,6 +574,87 @@
       });
       toast(`Reconcile: ${result.action} (${result.evidence_class || ""})`);
       await refresh();
+    } catch (err) {
+      toast(err.message, true);
+    }
+  });
+
+  $("btn-integrations").addEventListener("click", async () => {
+    try {
+      const data = await api("/api/integrations");
+      const el = $("integrations-panel");
+      el.classList.remove("empty");
+      el.innerHTML = `
+        <div class="row">Paperclip ${badge(data.paperclip && data.paperclip.evidence_class)} · OpenClaw ${badge((data.openclaw && data.openclaw.evidence_class) || "UNAVAILABLE")}</div>
+        <div class="meta">SANDBOX ${escapeHtml(data.sandbox_gate)} · Live ACP ${data.live_acp_enabled ? "ON" : "disabled"}</div>
+        <div class="meta">GitHub connections: ${escapeHtml(data.github_connections)}</div>
+      `;
+    } catch (err) {
+      toast(err.message, true);
+    }
+  });
+
+  $("form-paperclip-sync").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const fd = new FormData(ev.target);
+    try {
+      const result = await api("/api/paperclip/sync", {
+        method: "POST",
+        body: JSON.stringify({
+          company_id: fd.get("company_id"),
+          project_id: fd.get("project_id") || undefined,
+        }),
+      });
+      const el = $("paperclip-panel");
+      el.classList.remove("empty");
+      const snap = result.snapshot || {};
+      el.innerHTML = `
+        <div class="row"><strong>${escapeHtml((snap.company && snap.company.name) || "company")}</strong> ${badge(snap.evidence_class)}</div>
+        <div class="meta">Agents ${(snap.counts && snap.counts.agents) || 0} · Issues ${(snap.counts && snap.counts.issues) || 0} · Approvals ${(snap.counts && snap.counts.approvals) || 0}</div>
+        <div class="meta">Conflicts: ${(result.conflicts || []).length}</div>
+      `;
+      toast("Paperclip synced (explicit refresh)");
+    } catch (err) {
+      toast(err.message, true);
+    }
+  });
+
+  $("btn-openclaw-refresh").addEventListener("click", async () => {
+    try {
+      const result = await api("/api/openclaw/refresh", {
+        method: "POST",
+        body: "{}",
+      });
+      const st = result.status || {};
+      const el = $("openclaw-panel");
+      el.classList.remove("empty");
+      el.innerHTML = `
+        <div class="row">Installation ${st.installation_available ? "yes" : "no"} ${badge(st.evidence_class)}</div>
+        <div class="meta">Gateway RPC: ${escapeHtml(JSON.stringify((st.gateway && st.gateway.available) || false))}</div>
+        <div class="meta">Transport: ${escapeHtml((st.gateway_transport && st.gateway_transport.connection_lifecycle) || "unavailable")}</div>
+        <div class="meta">Live dispatch permitted: false</div>
+      `;
+      toast("OpenClaw refreshed (explicit)");
+    } catch (err) {
+      toast(err.message, true);
+    }
+  });
+
+  $("btn-orch-plan").addEventListener("click", async () => {
+    if (!selectedProjectId) return toast("Select a project first", true);
+    try {
+      const plan = await api(
+        `/api/orchestration/plan?project_id=${encodeURIComponent(selectedProjectId)}`
+      );
+      const el = $("orch-plan-panel");
+      el.classList.remove("empty");
+      el.innerHTML = `
+        <div class="row"><strong>Next task</strong> ${escapeHtml((plan.next_eligible_task && plan.next_eligible_task.task_id) || "none")}</div>
+        <div class="meta">Assigned agent: ${escapeHtml((plan.assigned_agent && plan.assigned_agent.name) || "—")}</div>
+        <div class="meta">Coordinator reachable: ${plan.coordinator_reachable}</div>
+        <div class="meta">Synthetic OK / Live ACP: ${plan.synthetic_execution_permitted} / ${plan.live_acp_enabled}</div>
+        <div class="meta">SANDBOX ${escapeHtml(plan.sandbox_gate)} · Paperclip ${badge((plan.evidence && plan.evidence.paperclip) || "—")} · OpenClaw ${badge((plan.evidence && plan.evidence.openclaw) || "—")}</div>
+      `;
     } catch (err) {
       toast(err.message, true);
     }

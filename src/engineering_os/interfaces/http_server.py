@@ -248,6 +248,66 @@ def make_handler(state: AppState) -> Callable[..., BaseHTTPRequestHandler]:
                     )
                     self._send(status, body, ctype)
                     return
+                if path == "/api/integrations":
+                    status, body, ctype = _json_bytes(state.plane.integrations_status())
+                    self._send(status, body, ctype)
+                    return
+                if path == "/api/paperclip/status":
+                    company_id = (qs.get("company_id") or [None])[0]
+                    status, body, ctype = _json_bytes(
+                        state.plane.paperclip_status(company_id)
+                    )
+                    self._send(status, body, ctype)
+                    return
+                if path == "/api/paperclip/companies":
+                    status, body, ctype = _json_bytes(
+                        state.plane.paperclip_list_companies()
+                    )
+                    self._send(status, body, ctype)
+                    return
+                if path == "/api/paperclip/agents":
+                    company_id = (qs.get("company_id") or [None])[0]
+                    if not company_id:
+                        status, body, ctype = _json_bytes(
+                            {"ok": False, "error": "company_id required"}, 400
+                        )
+                        self._send(status, body, ctype)
+                        return
+                    status, body, ctype = _json_bytes(
+                        state.plane.paperclip_list_agents(company_id)
+                    )
+                    self._send(status, body, ctype)
+                    return
+                if path == "/api/paperclip/issues":
+                    company_id = (qs.get("company_id") or [None])[0]
+                    if not company_id:
+                        status, body, ctype = _json_bytes(
+                            {"ok": False, "error": "company_id required"}, 400
+                        )
+                        self._send(status, body, ctype)
+                        return
+                    status, body, ctype = _json_bytes(
+                        state.plane.paperclip_list_issues(company_id)
+                    )
+                    self._send(status, body, ctype)
+                    return
+                if path == "/api/openclaw/status":
+                    status, body, ctype = _json_bytes(state.plane.openclaw_status())
+                    self._send(status, body, ctype)
+                    return
+                if path == "/api/orchestration/plan":
+                    project_id = (qs.get("project_id") or [None])[0]
+                    if not project_id:
+                        status, body, ctype = _json_bytes(
+                            {"ok": False, "error": "project_id required"}, 400
+                        )
+                        self._send(status, body, ctype)
+                        return
+                    status, body, ctype = _json_bytes(
+                        state.plane.orchestration_plan(project_id)
+                    )
+                    self._send(status, body, ctype)
+                    return
                 if path == "/api/goals":
                     project_id = (qs.get("project_id") or [None])[0]
                     status, body, ctype = _json_bytes(
@@ -490,6 +550,19 @@ def make_handler(state: AppState) -> Callable[..., BaseHTTPRequestHandler]:
                             complete_task=bool(data.get("complete_task", False)),
                         )
                     )
+                    self._send(status, body, ctype)
+                    return
+                if path == "/api/paperclip/sync":
+                    status, body, ctype = _json_bytes(
+                        state.plane.paperclip_sync(
+                            data["company_id"],
+                            project_id=data.get("project_id"),
+                        )
+                    )
+                    self._send(status, body, ctype)
+                    return
+                if path == "/api/openclaw/refresh":
+                    status, body, ctype = _json_bytes(state.plane.openclaw_refresh())
                     self._send(status, body, ctype)
                     return
                 status, body, ctype = _json_bytes(

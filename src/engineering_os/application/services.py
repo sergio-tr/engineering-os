@@ -50,6 +50,14 @@ from engineering_os.infrastructure.github_client import (
     HttpTransport,
     parse_repository,
 )
+from engineering_os.infrastructure.openclaw_adapter import OpenClawCoordinatorAdapter
+from engineering_os.infrastructure.openclaw_client import OpenClawCliClient
+from engineering_os.infrastructure.paperclip_adapter import PaperclipOrganizationAdapter
+from engineering_os.infrastructure.paperclip_client import (
+    DEFAULT_PAPERCLIP_URL,
+    PaperclipClient,
+    PaperclipClientError,
+)
 from engineering_os.infrastructure.sqlite_repo import Repository, default_db_path
 
 # Stable IDs for the persistent synthetic demonstration (idempotent seed).
@@ -79,6 +87,11 @@ class ControlPlane:
         github_transport: Optional[HttpTransport] = None,
         github_api_base: str = DEFAULT_API_BASE,
         github_token_provider: Optional[Callable[[], Optional[str]]] = None,
+        paperclip_transport: Optional[HttpTransport] = None,
+        paperclip_url: Optional[str] = None,
+        paperclip_token_provider: Optional[Callable[[], Optional[str]]] = None,
+        paperclip_company_id: Optional[str] = None,
+        openclaw_client: Optional[OpenClawCliClient] = None,
     ) -> None:
         self.repo = repo
         self.synthetic = execution_adapter or SyntheticExecutionAdapter()
@@ -94,6 +107,19 @@ class ControlPlane:
         self._github_token_provider = github_token_provider or (
             lambda: os.environ.get("EOS_GITHUB_TOKEN") or None
         )
+        self._paperclip_transport = paperclip_transport
+        self._paperclip_url = (
+            paperclip_url
+            or os.environ.get("EOS_PAPERCLIP_URL")
+            or DEFAULT_PAPERCLIP_URL
+        )
+        self._paperclip_token_provider = paperclip_token_provider or (
+            lambda: os.environ.get("EOS_PAPERCLIP_TOKEN") or None
+        )
+        self._paperclip_company_id = paperclip_company_id or os.environ.get(
+            "EOS_PAPERCLIP_COMPANY_ID"
+        )
+        self.openclaw = OpenClawCoordinatorAdapter(client=openclaw_client)
 
     # --- factories ---
     @classmethod
@@ -1096,6 +1122,354 @@ class ControlPlane:
             "synced_observation": synced["observation"],
             "execution_id": execution.execution_id,
             "note": "No live GitHub network requests were performed",
+        }
+
+    # --- Paperclip / OpenClaw integrations (EOS-05) ---
+    def _paperclip_client(self) -> PaperclipClient:
+        return PaperclipClient(
+            base_url=self._paperclip_url,
+            token=self._paperclip_token_provider(),
+            transport=self._paperclip_transport,
+        )
+
+    def _paperclip_adapter(
+        self, company_id: Optional[str] = None
+    ) -> PaperclipOrganizationAdapter:
+        return PaperclipOrganizationAdapter(
+            self._paperclip_client(),
+            company_id=company_id or self._paperclip_company_id,
+        )
+
+    def integrations_status(self) -> Dict[str, Any]:
+        return {
+            "paperclip": self.paperclip_status(),
+            "openclaw": self.openclaw.status(),
+            "github_connections": len(self.repo.list_github_connections()),
+            "sandbox_gate": self.sandbox_gate,
+            "live_acp_enabled": False,
+        }
+
+    def paperclip_status(self, company_id: Optional[str] = None) -> Dict[str, Any]:
+        adapter = self._paperclip_adapter(company_id)
+        diag = adapter.diagnostics()
+        latest = self.repo.latest_integration_observation(
+            system_name="paperclip",
+            company_id=company_id or self._paperclip_company_id,
+            include_stale=True,
+        )
+        return {
+            **diag,
+            "configured_company_id": company_id or self._paperclip_company_id,
+            "latest_observation": latest,
+            "token_configured": bool(self._paperclip_token_provider()),
+            "base_url": self._paperclip_url,
+        }
+
+    def paperclip_list_companies(self) -> Dict[str, Any]:
+        client = self._paperclip_client()
+        companies = client.list_companies()
+        return {
+            "companies": companies,
+            "evidence_class": "LIVE_READ_ONLY",
+            "client": client.redact(),
+        }
+
+    def paperclip_list_agents(self, company_id: str) -> Dict[str, Any]:
+        adapter = self._paperclip_adapter(company_id)
+        agents = adapter.client.list_agents(company_id)
+        return {
+            "company_id": company_id,
+            "agents": [adapter._public_agent(a) for a in agents],
+            "evidence_class": "LIVE_READ_ONLY",
+        }
+
+    def paperclip_list_issues(self, company_id: str) -> Dict[str, Any]:
+        adapter = self._paperclip_adapter(company_id)
+        issues = adapter.client.list_issues(company_id)
+        return {
+            "company_id": company_id,
+            "issues": [adapter._public_issue(i) for i in issues],
+            "evidence_class": "LIVE_READ_ONLY",
+        }
+
+    def paperclip_sync(
+        self, company_id: str, *, project_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        adapter = self._paperclip_adapter(company_id)
+        try:
+            snap = adapter.sync_snapshot()
+        except PaperclipClientError as exc:
+            obs = self.repo.insert_integration_observation(
+                {
+                    "observation_id": new_id("iobs"),
+                    "system_name": "paperclip",
+                    "project_id": project_id,
+                    "company_id": company_id,
+                    "evidence_class": "ERROR",
+                    "payload": {"error": {"code": exc.code, "message": str(exc)}},
+                }
+            )
+            raise PolicyError(f"paperclip_sync_failed:{exc.code}") from exc
+        # Persist mappings for projects/goals/issues/agents discovered.
+        mapped = []
+        conflicts = []
+        for project in snap["projects"]:
+            ext_id = str(project.get("id"))
+            if project.get("companyId") not in {None, company_id}:
+                conflicts.append({"kind": "project", "id": ext_id, "reason": "cross_company"})
+                continue
+            if project_id:
+                mapping = self.repo.upsert_external_mapping(
+                    {
+                        "mapping_id": new_id("map"),
+                        "system_name": "paperclip",
+                        "company_id": company_id,
+                        "local_kind": "project",
+                        "local_id": project_id,
+                        "external_id": ext_id,
+                        "evidence_class": "LIVE_READ_ONLY",
+                        "payload": project,
+                        "correlation_id": new_id("corr"),
+                    }
+                )
+                mapped.append(mapping)
+        for goal in snap["goals"]:
+            self.repo.upsert_external_mapping(
+                {
+                    "mapping_id": new_id("map"),
+                    "system_name": "paperclip",
+                    "company_id": company_id,
+                    "local_kind": "goal_external",
+                    "local_id": f"ext-goal:{goal.get('id')}",
+                    "external_id": str(goal.get("id")),
+                    "evidence_class": "LIVE_READ_ONLY",
+                    "payload": goal,
+                }
+            )
+        for agent in snap["agents"]:
+            self.repo.upsert_external_mapping(
+                {
+                    "mapping_id": new_id("map"),
+                    "system_name": "paperclip",
+                    "company_id": company_id,
+                    "local_kind": "agent",
+                    "local_id": f"ext-agent:{agent.get('id')}",
+                    "external_id": str(agent.get("id")),
+                    "evidence_class": "LIVE_READ_ONLY",
+                    "payload": agent,
+                }
+            )
+        for issue in snap["issues"]:
+            self.repo.upsert_external_mapping(
+                {
+                    "mapping_id": new_id("map"),
+                    "system_name": "paperclip",
+                    "company_id": company_id,
+                    "local_kind": "issue",
+                    "local_id": f"ext-issue:{issue.get('id')}",
+                    "external_id": str(issue.get("id")),
+                    "external_revision": issue.get("updatedAt"),
+                    "evidence_class": "LIVE_READ_ONLY",
+                    "payload": issue,
+                }
+            )
+        obs = self.repo.insert_integration_observation(
+            {
+                "observation_id": new_id("iobs"),
+                "system_name": "paperclip",
+                "project_id": project_id,
+                "company_id": company_id,
+                "evidence_class": snap["evidence_class"],
+                "payload": {
+                    "agents": len(snap["agents"]),
+                    "projects": len(snap["projects"]),
+                    "goals": len(snap["goals"]),
+                    "issues": len(snap["issues"]),
+                    "approvals": len(snap["approvals"]),
+                    "org": snap["org"],
+                    "company": snap["company"],
+                    "issues_detail": snap["issues"],
+                    "agents_detail": snap["agents"],
+                    "projects_detail": snap["projects"],
+                    "goals_detail": snap["goals"],
+                    "approvals_detail": snap["approvals"],
+                },
+            }
+        )
+        self._emit(
+            aggregate_type="integration",
+            aggregate_id=company_id,
+            event_type="paperclip.synced",
+            payload={
+                "observation_id": obs["observation_id"],
+                "mapped": len(mapped),
+                "conflicts": conflicts,
+            },
+        )
+        return {
+            "snapshot": {
+                "company": snap["company"],
+                "counts": {
+                    "agents": len(snap["agents"]),
+                    "projects": len(snap["projects"]),
+                    "goals": len(snap["goals"]),
+                    "issues": len(snap["issues"]),
+                    "approvals": len(snap["approvals"]),
+                },
+                "evidence_class": snap["evidence_class"],
+            },
+            "observation": obs,
+            "mappings": mapped,
+            "conflicts": conflicts,
+            "agents": snap["agents"],
+            "issues": snap["issues"],
+            "projects": snap["projects"],
+            "goals": snap["goals"],
+            "approvals": snap["approvals"],
+            "org": snap["org"],
+        }
+
+    def paperclip_link_project(
+        self, local_project_id: str, external_project_id: str, *, company_id: str
+    ) -> Dict[str, Any]:
+        self.get_project(local_project_id)
+        existing = self.repo.get_external_mapping(
+            "paperclip", "project", local_project_id
+        )
+        if existing and existing["external_id"] != external_project_id:
+            if existing.get("company_id") != company_id:
+                raise PolicyError("cross_company_mapping_rejected")
+            raise PolicyError("duplicate_project_mapping_conflict")
+        mapping = self.repo.upsert_external_mapping(
+            {
+                "mapping_id": new_id("map"),
+                "system_name": "paperclip",
+                "company_id": company_id,
+                "local_kind": "project",
+                "local_id": local_project_id,
+                "external_id": external_project_id,
+                "evidence_class": "LIVE_READ_ONLY",
+                "payload": {"linked_by": "owner"},
+                "correlation_id": new_id("corr"),
+            }
+        )
+        self._emit(
+            aggregate_type="project",
+            aggregate_id=local_project_id,
+            event_type="paperclip.project_linked",
+            payload={
+                "external_id": external_project_id,
+                "company_id": company_id,
+            },
+        )
+        return mapping
+
+    def paperclip_create_issue(
+        self,
+        company_id: str,
+        payload: Dict[str, Any],
+        *,
+        apply: bool = False,
+        idempotency_key: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        client = self._paperclip_client()
+        key = idempotency_key or new_id("pciss")
+        # Duplicate suppression via mapping of correlation key.
+        prior = self.repo.get_external_mapping(
+            "paperclip", "issue_create", key
+        )
+        if prior and apply:
+            return {
+                "suppressed_duplicate": True,
+                "existing": prior,
+                "dry_run": False,
+            }
+        result = client.create_issue(
+            company_id, payload, apply=apply, idempotency_key=key
+        )
+        if apply and not result.get("dry_run"):
+            issue = result.get("issue") or {}
+            self.repo.upsert_external_mapping(
+                {
+                    "mapping_id": new_id("map"),
+                    "system_name": "paperclip",
+                    "company_id": company_id,
+                    "local_kind": "issue_create",
+                    "local_id": key,
+                    "external_id": str(issue.get("id") or key),
+                    "evidence_class": "LIVE_READ_ONLY",
+                    "payload": {"issue": issue, "note": "owner_apply_only"},
+                    "correlation_id": key,
+                }
+            )
+        # Never start agents / heartbeats / spending — create issue only.
+        result["agent_work_triggered"] = False
+        result["token_configured"] = bool(self._paperclip_token_provider())
+        return result
+
+    def openclaw_refresh(self) -> Dict[str, Any]:
+        observation = self.openclaw.refresh()
+        obs = self.repo.insert_integration_observation(
+            {
+                "observation_id": new_id("iobs"),
+                "system_name": "openclaw",
+                "evidence_class": observation.get("evidence_class") or "UNAVAILABLE",
+                "payload": observation,
+            }
+        )
+        self._emit(
+            aggregate_type="integration",
+            aggregate_id="openclaw",
+            event_type="openclaw.refreshed",
+            payload={"observation_id": obs["observation_id"]},
+        )
+        return {"observation": obs, "status": observation}
+
+    def openclaw_status(self) -> Dict[str, Any]:
+        latest = self.repo.latest_integration_observation(
+            system_name="openclaw", include_stale=True
+        )
+        return {
+            **self.openclaw.status(),
+            "latest_observation": latest,
+            "live_dispatch_permitted": False,
+        }
+
+    def orchestration_plan(self, project_id: str) -> Dict[str, Any]:
+        from engineering_os.application.orchestrator import SequentialOrchestrator
+
+        orch = SequentialOrchestrator(self)
+        return orch.build_plan(project_id)
+
+    def run_eos05_fixture_demo(self) -> Dict[str, Any]:
+        if self._paperclip_transport is None:
+            raise PolicyError("paperclip_fixture_transport_required")
+        from engineering_os.infrastructure.eos05_fixtures import COMPANY_ID, PROJECT_EXT
+
+        project = self.create_project("EOS-05 Demo", "local/eos05")
+        goal = self.create_goal(project.project_id, "Integrate Paperclip/OpenClaw")
+        t1 = self.create_task(goal.goal_id, "Import org observations")
+        t2 = self.create_task(
+            goal.goal_id, "Plan orchestration", depends_on=[t1.task_id]
+        )
+        self.approve_goal(goal.goal_id)
+        self.paperclip_link_project(project.project_id, PROJECT_EXT, company_id=COMPANY_ID)
+        sync = self.paperclip_sync(COMPANY_ID, project_id=project.project_id)
+        oc = self.openclaw_refresh()
+        plan = self.orchestration_plan(project.project_id)
+        return {
+            "mode": "FIXTURE_OFFLINE",
+            "project_id": project.project_id,
+            "task1_id": t1.task_id,
+            "task2_id": t2.task_id,
+            "paperclip_sync": sync["snapshot"],
+            "openclaw": {
+                "evidence_class": oc["status"].get("evidence_class"),
+                "installation_available": oc["status"].get("installation_available"),
+            },
+            "plan": plan,
+            "live_acp_enabled": False,
+            "note": "No live Paperclip/OpenClaw network or process calls in fixture mode",
         }
 
     # --- helpers ---

@@ -331,3 +331,92 @@ class SequentialOrchestrator:
             "claim": self.plane.repo.get_claim(project_id),
             "sandbox_gate": self.plane.sandbox_gate,
         }
+
+    def build_plan(self, project_id: str) -> Dict[str, Any]:
+        """Deterministic orchestration plan from local + observed external state."""
+        self.plane.get_project(project_id)
+        next_task_id = self.next_eligible_task(project_id)
+        next_task = (
+            self.plane._require_task(next_task_id).to_dict() if next_task_id else None
+        )
+        tasks = self.plane.repo.list_tasks(project_id=project_id)
+        blockers = []
+        for task in tasks:
+            if task.lifecycle_state in {"BLOCKED", "FAILED"}:
+                blockers.append(
+                    {
+                        "task_id": task.task_id,
+                        "state": task.lifecycle_state,
+                        "reason": task.blocked_reason,
+                    }
+                )
+        paperclip_obs = self.plane.repo.latest_integration_observation(
+            system_name="paperclip", project_id=project_id, include_stale=True
+        )
+        openclaw = self.plane.openclaw_status()
+        github = self.plane.github_status(project_id)
+        project_map = self.plane.repo.get_external_mapping(
+            "paperclip", "project", project_id
+        )
+        issue_maps = self.plane.repo.list_external_mappings(
+            system_name="paperclip", local_kind="issue"
+        )
+        assigned_agent = None
+        external_issue = None
+        if paperclip_obs and isinstance(paperclip_obs.get("payload"), dict):
+            issues = paperclip_obs["payload"].get("issues_detail") or []
+            agents = paperclip_obs["payload"].get("agents_detail") or []
+            if issues:
+                external_issue = issues[0]
+                agent_id = external_issue.get("assigneeAgentId")
+                for agent in agents:
+                    if agent.get("id") == agent_id:
+                        assigned_agent = agent
+                        break
+        live_execution_permitted = self.plane.sandbox_gate == "PASS"
+        coordinator_reachable = False
+        if isinstance(openclaw.get("gateway"), dict):
+            coordinator_reachable = bool(openclaw["gateway"].get("available"))
+        elif isinstance(openclaw.get("status"), dict):
+            coordinator_reachable = bool(openclaw["status"].get("available"))
+        elif openclaw.get("evidence_class") == "LIVE_READ_ONLY":
+            coordinator_reachable = True
+
+        return {
+            "project_id": project_id,
+            "next_eligible_task": next_task,
+            "assigned_agent": assigned_agent,
+            "blockers": blockers,
+            "external_issue_mapping": {
+                "project": project_map,
+                "issues": issue_maps[:20],
+                "sample_issue": external_issue,
+            },
+            "coordinator_reachable": coordinator_reachable,
+            "openclaw": {
+                "evidence_class": openclaw.get("evidence_class"),
+                "installation_available": openclaw.get("installation_available"),
+                "live_dispatch_permitted": False,
+            },
+            "github": {
+                "connected": bool(github.get("connection")),
+                "repository": (github.get("connection") or {}).get(
+                    "repository_identity"
+                ),
+            },
+            "sandbox_gate": self.plane.sandbox_gate,
+            "synthetic_execution_permitted": True,
+            "live_execution_permitted": live_execution_permitted,
+            "live_acp_enabled": False,
+            "evidence": {
+                "paperclip": (paperclip_obs or {}).get("evidence_class"),
+                "paperclip_stale": bool((paperclip_obs or {}).get("stale")),
+                "openclaw": openclaw.get("evidence_class"),
+            },
+            "decision_notes": [
+                "Paperclip is organizational observation only",
+                "OpenClaw is coordinator availability only",
+                "Local execution eligibility remains authoritative",
+                "SANDBOX gate blocks live ACP regardless of Paperclip/OpenClaw status",
+            ],
+        }

@@ -8,6 +8,7 @@ LIVE_READ_ONLY = "LIVE_READ_ONLY"
 CACHED = "CACHED"
 UNVERIFIED = "UNVERIFIED"
 ERROR = "ERROR"
+UNAVAILABLE = "UNAVAILABLE"
 
 # Legacy synthetic adapter label (preserved).
 SIMULATED_INTEGRATION = "simulated_integration"
@@ -20,6 +21,7 @@ EVIDENCE_CLASSES = frozenset(
         CACHED,
         UNVERIFIED,
         ERROR,
+        UNAVAILABLE,
         SIMULATED_INTEGRATION,
         EXTERNALLY_VERIFIED,
     }

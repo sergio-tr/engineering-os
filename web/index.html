@@ -89,6 +89,32 @@
     </section>
 
     <section>
+      <h2>Integrations</h2>
+      <div class="row" style="margin-bottom:0.75rem">
+        <button type="button" id="btn-integrations">Refresh integrations overview</button>
+        <button type="button" id="btn-orch-plan">Orchestration plan</button>
+      </div>
+      <div id="integrations-panel" class="panel empty">Load integrations explicitly</div>
+      <div class="grid-2">
+        <div>
+          <h3>Paperclip <span class="badge">LIVE_READ_ONLY</span></h3>
+          <form id="form-paperclip-sync" class="stack">
+            <label>Company ID <input name="company_id" id="paperclip-company-id" required /></label>
+            <label>Local project ID <input name="project_id" id="paperclip-project-id" /></label>
+            <button type="submit">Sync Paperclip</button>
+          </form>
+          <div id="paperclip-panel" class="panel empty">No Paperclip sync yet</div>
+        </div>
+        <div>
+          <h3>OpenClaw <span class="badge">READ-ONLY</span></h3>
+          <button type="button" id="btn-openclaw-refresh">Refresh OpenClaw status</button>
+          <div id="openclaw-panel" class="panel empty" style="margin-top:0.75rem">No OpenClaw refresh yet</div>
+        </div>
+      </div>
+      <div id="orch-plan-panel" class="panel empty">No orchestration plan loaded</div>
+    </section>
+
+    <section>
       <h2>GitHub integration <span class="badge">READ-ONLY</span></h2>
       <p class="meta">Observations are REAL, CACHED or ERROR. Synthetic orchestrator merges stay separate.</p>
       <form id="form-github" class="stack">
