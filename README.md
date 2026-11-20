@@ -8,7 +8,38 @@ Engineering OS is a **local-first** platform for autonomous, supervised software
 
 ## Current status
 
-The project is in **planning and technical validation**. There is no operational platform yet. This repository holds the documentary foundation, the versioned backlog, and the governance contracts for the work.
+Documentary foundation, versioned backlog, and governance contracts are in place.
+An **operational MVP control plane** is available for local synthetic workflows
+(SQLite + CLI + localhost dashboard). Live Cursor ACP execution remains **disabled**
+until the SANDBOX isolation gate is approved.
+
+See [docs/architecture/control-plane-mvp.md](docs/architecture/control-plane-mvp.md).
+
+### Quick start (local MVP)
+
+```bash
+# Initialize DB (default: ~/.local/share/engineering-os/control-plane.sqlite3)
+python3 scripts/eos.py init
+
+# Idempotent persistent SYNTHETIC demo (visible in the dashboard)
+python3 scripts/eos.py seed
+# equivalent: python3 scripts/eos.py demo
+
+# Ephemeral demo (temporary DB; for CI/local checks)
+python3 scripts/eos.py demo --temp
+
+# Start localhost dashboard (127.0.0.1:8765)
+python3 scripts/eos.py serve --host 127.0.0.1 --port 8765
+
+# Run tests (stdlib unittest; no package install required)
+PYTHONPATH=src python3 -m unittest discover -s tests -v
+```
+
+After `seed`, open http://127.0.0.1:8765 — the overview and project list show persisted
+demo data (`proj-eos-mvp-demo`). Re-running `seed` is safe (idempotent).
+
+Synthetic executions and simulated PR/CI/merge checkpoints are labeled **SYNTHETIC**.
+They are not real agent runs or real GitHub merges.
 
 ## Candidate architecture (provisional)
 
@@ -68,4 +99,4 @@ This architecture is **provisional**. It is neither implemented nor validated en
 
 ## Warning
 
-Engineering OS is **not** an operational platform yet. There is no product CI, no production agents, and no automated merges. Any claim of end-to-end operation would be incorrect.
+The local MVP can create projects/goals/tasks, run **synthetic** executions, and show a localhost dashboard. It does **not** enable live Cursor ACP, production agents, or real GitHub merges. SANDBOX remains unapproved for live execution.

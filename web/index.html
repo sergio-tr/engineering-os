@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Engineering OS · Control Plane</title>
+  <link rel="stylesheet" href="/app.css" />
+</head>
+<body>
+  <header class="top">
+    <div class="brand">
+      <span class="mark">EOS</span>
+      <div>
+        <h1>Engineering OS</h1>
+        <p class="tag">Local control plane · SYNTHETIC execution only</p>
+      </div>
+    </div>
+    <div class="header-actions">
+      <span id="health-pill" class="pill">…</span>
+      <button type="button" id="btn-refresh">Refresh</button>
+      <button type="button" id="btn-demo" class="primary">Seed SYNTHETIC demo</button>
+    </div>
+  </header>
+
+  <main>
+    <section class="overview" id="overview">
+      <h2>Overview</h2>
+      <div class="stats" id="stats"></div>
+    </section>
+
+    <section class="grid-2">
+      <div>
+        <h2>Projects</h2>
+        <form id="form-project" class="stack">
+          <label>Name <input name="name" required placeholder="Demo project" /></label>
+          <label>Repository identity <input name="repository_identity" required placeholder="local/demo" /></label>
+          <button type="submit">Create project</button>
+        </form>
+        <ul id="project-list" class="list"></ul>
+      </div>
+      <div>
+        <h2>Selected project</h2>
+        <div id="project-detail" class="panel empty">Select a project</div>
+        <div id="orch-panel" class="panel muted"></div>
+      </div>
+    </section>
+
+    <section class="grid-2">
+      <div>
+        <h2>Goals</h2>
+        <form id="form-goal" class="stack">
+          <label>Project ID <input name="project_id" id="goal-project-id" required /></label>
+          <label>Title <input name="title" required /></label>
+          <label>Description <input name="description" /></label>
+          <button type="submit">Create goal</button>
+        </form>
+        <ul id="goal-list" class="list"></ul>
+      </div>
+      <div>
+        <h2>Tasks</h2>
+        <form id="form-task" class="stack">
+          <label>Goal ID <input name="goal_id" id="task-goal-id" required /></label>
+          <label>Description <input name="description" required /></label>
+          <label>Depends on (comma IDs) <input name="depends_on" placeholder="task-…" /></label>
+          <button type="submit">Create task</button>
+        </form>
+        <div class="filters">
+          <label>Filter state
+            <select id="task-state-filter">
+              <option value="">All</option>
+              <option>PLANNED</option>
+              <option>READY</option>
+              <option>RUNNING</option>
+              <option>BLOCKED</option>
+              <option>REVIEW</option>
+              <option>DONE</option>
+              <option>FAILED</option>
+            </select>
+          </label>
+        </div>
+        <ul id="task-list" class="list"></ul>
+      </div>
+    </section>
+
+    <section>
+      <h2>Executions</h2>
+      <ul id="execution-list" class="list"></ul>
+      <div id="execution-detail" class="panel empty">Select an execution</div>
+    </section>
+
+    <section>
+      <h2>Operational events</h2>
+      <ul id="event-list" class="list compact"></ul>
+    </section>
+  </main>
+
+  <div id="toast" hidden></div>
+  <script src="/app.js"></script>
+</body>
+</html>
