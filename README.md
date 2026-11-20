@@ -41,6 +41,26 @@ demo data (`proj-eos-mvp-demo`). Re-running `seed` is safe (idempotent).
 Synthetic executions and simulated PR/CI/merge checkpoints are labeled **SYNTHETIC**.
 They are not real agent runs or real GitHub merges.
 
+### GitHub read-only integration (EOS-04)
+
+```bash
+# Offline fixture demonstration (no network)
+python3 scripts/eos.py github demo-fixture --temp
+
+# Owner-authorized live read-only sync (optional token for private repos)
+export EOS_GITHUB_TOKEN=ghp_readonly_only   # never committed; not stored in SQLite
+python3 scripts/eos.py github connect OWNER/REPO --project-id PROJECT_ID
+python3 scripts/eos.py github sync --project-id PROJECT_ID
+python3 scripts/eos.py github prs --project-id PROJECT_ID
+python3 scripts/eos.py github link-pr EXECUTION_ID PR_NUMBER
+python3 scripts/eos.py github reconcile EXECUTION_ID
+```
+
+Evidence classes: `SYNTHETIC`, `LIVE_READ_ONLY`, `CACHED`, `UNVERIFIED`, `ERROR`,
+plus legacy `simulated_integration` for the synthetic orchestrator path.
+A simulated merge never counts as an externally verified GitHub merge.
+Live Cursor ACP remains disabled while SANDBOX is not PASS.
+
 ## Candidate architecture (provisional)
 
 The priority candidate chain is:

@@ -212,9 +212,59 @@
     `;
   }
 
+  function renderGitHub(github) {
+    const el = $("github-panel");
+    if (!github || !github.connection) {
+      el.classList.add("empty");
+      el.textContent = "No GitHub connection for this project";
+      return;
+    }
+    el.classList.remove("empty");
+    const c = github.connection;
+    const latest = github.latest_observation;
+    const evidence = latest
+      ? latest.stale
+        ? "CACHED"
+        : latest.evidence_class
+      : "—";
+    el.innerHTML = `
+      <div class="row"><strong>${escapeHtml(c.repository_identity)}</strong> ${badge(evidence)}</div>
+      <div class="meta">Default branch: ${escapeHtml(c.default_branch || "—")} · Head ${escapeHtml(c.head_sha || "—")}</div>
+      <div class="meta">Last sync: ${escapeHtml(c.last_sync_at || "never")}</div>
+      <div class="meta">Token configured: ${github.token_configured ? "yes (not displayed)" : "no (public repos only)"}</div>
+      <div class="meta">Live ACP: disabled · SANDBOX ${escapeHtml(github.sandbox_gate || "")}</div>
+      ${
+        c.last_error
+          ? `<div class="meta">API error: ${escapeHtml(JSON.stringify(c.last_error))}</div>`
+          : ""
+      }
+      <div class="meta">PR links: ${(github.pr_links || []).length}</div>
+    `;
+  }
+
+  function renderGitHubPrs(payload) {
+    const ul = $("github-pr-list");
+    const prs = (payload && payload.pull_requests) || [];
+    const cls = (payload && payload.evidence_class) || "UNVERIFIED";
+    if (!prs.length) {
+      ul.innerHTML = `<li class="empty">No pull requests (${escapeHtml(cls)})</li>`;
+      return;
+    }
+    ul.innerHTML = prs
+      .map(
+        (pr) => `<li>
+        <div class="row"><strong>#${escapeHtml(pr.pr_number)}</strong> ${badge(pr.pr_state)} ${badge(pr.evidence_class || cls)}</div>
+        <div class="meta">${escapeHtml(pr.title || "")}</div>
+        <div class="meta">CI ${escapeHtml(pr.ci_status || "n/a")} · Reviews ${escapeHtml(pr.review_status || "n/a")} · Merge ${escapeHtml(pr.merge_commit_sha || "—")}</div>
+      </li>`
+      )
+      .join("");
+  }
+
   async function openProject(projectId) {
     selectedProjectId = projectId;
     $("goal-project-id").value = projectId;
+    $("github-project-id").value = projectId;
     const detail = await api(`/api/projects/${encodeURIComponent(projectId)}`);
     const p = detail.project;
     $("project-detail").classList.remove("empty");
@@ -236,6 +286,7 @@
     );
     renderExecutions(detail.executions || []);
     renderOrchestration(detail.orchestration);
+    renderGitHub(detail.github);
   }
 
   async function openExecution(executionId) {
@@ -439,6 +490,88 @@
           ? "SYNTHETIC demo seeded into persistent database"
           : "SYNTHETIC demo already present (idempotent)"
       );
+      await refresh();
+    } catch (err) {
+      toast(err.message, true);
+    }
+  });
+
+  $("form-github").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const fd = new FormData(ev.target);
+    try {
+      await api("/api/github/connect", {
+        method: "POST",
+        body: JSON.stringify({
+          project_id: fd.get("project_id"),
+          repository: fd.get("repository"),
+        }),
+      });
+      selectedProjectId = String(fd.get("project_id"));
+      toast("GitHub connection configured (read-only)");
+      await refresh();
+    } catch (err) {
+      toast(err.message, true);
+    }
+  });
+
+  $("btn-gh-sync").addEventListener("click", async () => {
+    if (!selectedProjectId) return toast("Select a project first", true);
+    try {
+      await api("/api/github/sync", {
+        method: "POST",
+        body: JSON.stringify({ project_id: selectedProjectId }),
+      });
+      toast("GitHub repository synced (read-only)");
+      await refresh();
+    } catch (err) {
+      toast(err.message, true);
+    }
+  });
+
+  $("btn-gh-prs").addEventListener("click", async () => {
+    if (!selectedProjectId) return toast("Select a project first", true);
+    try {
+      const payload = await api(
+        `/api/github/prs?project_id=${encodeURIComponent(selectedProjectId)}`
+      );
+      renderGitHubPrs(payload);
+      toast(`Pull requests loaded (${payload.evidence_class || "REAL"})`);
+    } catch (err) {
+      toast(err.message, true);
+    }
+  });
+
+  $("form-gh-link").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const fd = new FormData(ev.target);
+    try {
+      await api("/api/github/link-pr", {
+        method: "POST",
+        body: JSON.stringify({
+          execution_id: fd.get("execution_id"),
+          pr_number: Number(fd.get("pr_number")),
+        }),
+      });
+      toast("Execution linked to PR (explicit association)");
+      await refresh();
+    } catch (err) {
+      toast(err.message, true);
+    }
+  });
+
+  $("form-gh-reconcile").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const fd = new FormData(ev.target);
+    try {
+      const result = await api("/api/github/reconcile", {
+        method: "POST",
+        body: JSON.stringify({
+          execution_id: fd.get("execution_id"),
+          complete_task: fd.get("complete_task") === "on",
+        }),
+      });
+      toast(`Reconcile: ${result.action} (${result.evidence_class || ""})`);
       await refresh();
     } catch (err) {
       toast(err.message, true);

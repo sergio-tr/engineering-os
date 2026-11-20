@@ -127,6 +127,10 @@ class LocalEvidenceAdapter(EvidenceAdapter):
         return key
 
 
+class UnsupportedIntegrationOperation(RuntimeError):
+    """Raised when a read-only adapter is asked to perform a synthetic mutation."""
+
+
 @dataclass
 class RepositoryObservation:
     pr_identity: Optional[str]
@@ -135,13 +139,40 @@ class RepositoryObservation:
     merge_commit_sha: Optional[str]
     base_branch_sha: Optional[str]
     review_status: str
-    evidence_class: str  # simulated_integration | externally_verified
+    evidence_class: str  # SYNTHETIC | LIVE_READ_ONLY | CACHED | ... | simulated_integration
+    repository_identity: Optional[str] = None
+    pr_number: Optional[int] = None
+    head_sha: Optional[str] = None
+    base_ref: Optional[str] = None
+    details: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "pr_identity": self.pr_identity,
+            "pr_state": self.pr_state,
+            "ci_status": self.ci_status,
+            "merge_commit_sha": self.merge_commit_sha,
+            "base_branch_sha": self.base_branch_sha,
+            "review_status": self.review_status,
+            "evidence_class": self.evidence_class,
+            "repository_identity": self.repository_identity,
+            "pr_number": self.pr_number,
+            "head_sha": self.head_sha,
+            "base_ref": self.base_ref,
+            "details": dict(self.details),
+        }
 
 
-class RepositoryIntegrationAdapter(ABC):
+class RepositoryObservationPort(ABC):
+    """Read-only observation of external repository integration state."""
+
     @abstractmethod
     def observe(self, project_id: str, execution_id: str) -> RepositoryObservation:
         raise NotImplementedError
+
+
+class SyntheticRepositoryCommands(ABC):
+    """Synthetic-only mutation helpers for the local orchestrator path."""
 
     @abstractmethod
     def simulate_pr(self, project_id: str, execution_id: str) -> RepositoryObservation:
@@ -152,6 +183,10 @@ class RepositoryIntegrationAdapter(ABC):
         self, execution_id: str, *, approved: bool
     ) -> RepositoryObservation:
         raise NotImplementedError
+
+
+class RepositoryIntegrationAdapter(RepositoryObservationPort, SyntheticRepositoryCommands):
+    """Combined port used by the synthetic orchestrator."""
 
 
 class SimulatedRepositoryIntegrationAdapter(RepositoryIntegrationAdapter):
@@ -170,6 +205,7 @@ class SimulatedRepositoryIntegrationAdapter(RepositoryIntegrationAdapter):
             base_branch_sha="sim-base-sha",
             review_status="pending",
             evidence_class="simulated_integration",
+            repository_identity="local/synthetic",
         )
         self._by_exec[execution_id] = obs
         return obs
@@ -185,6 +221,7 @@ class SimulatedRepositoryIntegrationAdapter(RepositoryIntegrationAdapter):
             base_branch_sha=None,
             review_status="unknown",
             evidence_class="simulated_integration",
+            repository_identity="local/synthetic",
         )
 
     def complete_ci(self, execution_id: str, *, success: bool = True) -> RepositoryObservation:

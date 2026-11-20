@@ -247,6 +247,98 @@ def cmd_serve(args: argparse.Namespace) -> int:
     return serve(host=args.host, port=args.port, db_path=args.db)
 
 
+def cmd_github(args: argparse.Namespace) -> int:
+    plane = _plane(args.db)
+    try:
+        action = args.github_cmd
+        if action == "connect":
+            _print(
+                plane.configure_github_connection(
+                    args.project_id, args.repository, api_base=args.api_base
+                )
+            )
+            return 0
+        if action == "status":
+            _print(plane.github_status(args.project_id))
+            return 0
+        if action == "prs":
+            _print(
+                plane.list_github_pull_requests(
+                    args.project_id, state=args.state, use_cache=args.cache
+                )
+            )
+            return 0
+        if action == "sync":
+            _print(plane.sync_github_repository(args.project_id))
+            return 0
+        if action == "link-pr":
+            _print(
+                plane.link_execution_to_pr(
+                    args.execution_id,
+                    int(args.pr_number),
+                    expected_base_ref=args.base_ref,
+                    expected_head_sha=args.head_sha,
+                )
+            )
+            return 0
+        if action == "reconcile":
+            _print(
+                plane.reconcile_github_merge(
+                    args.execution_id, complete_task=args.complete_task
+                )
+            )
+            return 0
+        if action == "demo-fixture":
+            from engineering_os.infrastructure.github_fixtures import (
+                build_demo_fixture_transport,
+            )
+
+            plane.close()
+            path = Path(args.db) if args.db else default_db_path()
+            if args.temp:
+                import tempfile
+
+                path = Path(tempfile.mkdtemp(prefix="eos-gh-")) / "demo.sqlite3"
+            from engineering_os.application.services import ControlPlane
+            from engineering_os.infrastructure.sqlite_repo import Repository
+
+            plane2 = ControlPlane(
+                Repository(path), github_transport=build_demo_fixture_transport()
+            )
+            try:
+                result = plane2.run_github_fixture_demo()
+                project_id = result["project_id"]
+                execution_id = result["execution_id"]
+                plane2.close()
+                plane3 = ControlPlane(
+                    Repository(path), github_transport=build_demo_fixture_transport()
+                )
+                try:
+                    cached = plane3.cached_github_observation(
+                        project_id, execution_id=execution_id
+                    )
+                    reconciled = plane3.reconcile_github_merge(
+                        execution_id, complete_task=False
+                    )
+                    result["restart_cached_observation"] = cached
+                    result["reconcile"] = reconciled
+                    result["db_path"] = str(path)
+                    _print(result)
+                    return 0
+                finally:
+                    plane3.close()
+            except Exception:
+                plane2.close()
+                raise
+        _print({"ok": False, "error": f"unknown github command: {action}"})
+        return 2
+    finally:
+        try:
+            plane.close()
+        except Exception:
+            pass
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="eos",
@@ -348,6 +440,42 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=8765)
     p.set_defaults(func=cmd_serve)
+
+    p = sub.add_parser("github", help="Read-only GitHub integration (EOS-04)")
+    gs = p.add_subparsers(dest="github_cmd", required=True)
+    c = gs.add_parser("connect")
+    c.add_argument("repository", help="OWNER/REPO")
+    c.add_argument("--project-id", required=True)
+    c.add_argument("--api-base", default=None)
+    c.set_defaults(func=cmd_github)
+    c = gs.add_parser("status")
+    c.add_argument("--project-id", required=True)
+    c.set_defaults(func=cmd_github)
+    c = gs.add_parser("prs")
+    c.add_argument("--project-id", required=True)
+    c.add_argument("--state", default="all")
+    c.add_argument("--cache", action="store_true")
+    c.set_defaults(func=cmd_github)
+    c = gs.add_parser("sync")
+    c.add_argument("--project-id", required=True)
+    c.set_defaults(func=cmd_github)
+    c = gs.add_parser("link-pr")
+    c.add_argument("execution_id")
+    c.add_argument("pr_number", type=int)
+    c.add_argument("--base-ref", default=None)
+    c.add_argument("--head-sha", default=None)
+    c.set_defaults(func=cmd_github)
+    c = gs.add_parser("reconcile")
+    c.add_argument("execution_id")
+    c.add_argument(
+        "--complete-task",
+        action="store_true",
+        help="Complete AWAITING_INTEGRATION execution after verified merge",
+    )
+    c.set_defaults(func=cmd_github)
+    c = gs.add_parser("demo-fixture", help="Offline fixture-based GitHub demo")
+    c.add_argument("--temp", action="store_true")
+    c.set_defaults(func=cmd_github)
 
     return parser
 
