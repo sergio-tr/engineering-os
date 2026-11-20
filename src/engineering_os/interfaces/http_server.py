@@ -191,6 +191,7 @@ def make_handler(state: AppState) -> Callable[..., BaseHTTPRequestHandler]:
                         for e in state.plane.repo.list_executions(project_id=project_id)
                     ]
                     queue = state.orchestrator.queue_snapshot(project_id)
+                    github = state.plane.github_status(project_id)
                     status, body, ctype = _json_bytes(
                         {
                             "project": project.to_dict(),
@@ -198,7 +199,52 @@ def make_handler(state: AppState) -> Callable[..., BaseHTTPRequestHandler]:
                             "tasks": tasks,
                             "executions": executions,
                             "orchestration": queue,
+                            "github": github,
                         }
+                    )
+                    self._send(status, body, ctype)
+                    return
+                if path == "/api/github/status":
+                    project_id = (qs.get("project_id") or [None])[0]
+                    if not project_id:
+                        status, body, ctype = _json_bytes(
+                            {"ok": False, "error": "project_id required"}, 400
+                        )
+                        self._send(status, body, ctype)
+                        return
+                    status, body, ctype = _json_bytes(
+                        state.plane.github_status(project_id)
+                    )
+                    self._send(status, body, ctype)
+                    return
+                if path == "/api/github/prs":
+                    project_id = (qs.get("project_id") or [None])[0]
+                    if not project_id:
+                        status, body, ctype = _json_bytes(
+                            {"ok": False, "error": "project_id required"}, 400
+                        )
+                        self._send(status, body, ctype)
+                        return
+                    use_cache = (qs.get("cache") or ["0"])[0] in {"1", "true", "yes"}
+                    status, body, ctype = _json_bytes(
+                        state.plane.list_github_pull_requests(
+                            project_id,
+                            state=(qs.get("state") or ["all"])[0],
+                            use_cache=use_cache,
+                        )
+                    )
+                    self._send(status, body, ctype)
+                    return
+                if path == "/api/github/observations":
+                    project_id = (qs.get("project_id") or [None])[0]
+                    if not project_id:
+                        status, body, ctype = _json_bytes(
+                            {"ok": False, "error": "project_id required"}, 400
+                        )
+                        self._send(status, body, ctype)
+                        return
+                    status, body, ctype = _json_bytes(
+                        state.plane.repo.list_github_observations(project_id=project_id)
                     )
                     self._send(status, body, ctype)
                     return
@@ -407,6 +453,43 @@ def make_handler(state: AppState) -> Callable[..., BaseHTTPRequestHandler]:
                         approve_merge=bool(data.get("approve_merge", True)),
                     )
                     status, body, ctype = _json_bytes(result)
+                    self._send(status, body, ctype)
+                    return
+                if path == "/api/github/connect":
+                    result = state.plane.configure_github_connection(
+                        data["project_id"],
+                        data["repository"],
+                        api_base=data.get("api_base"),
+                    )
+                    # Never echo tokens.
+                    safe = {k: v for k, v in result.items() if "token" not in k.lower() or k == "token_configured"}
+                    status, body, ctype = _json_bytes(safe, 201)
+                    self._send(status, body, ctype)
+                    return
+                if path == "/api/github/sync":
+                    status, body, ctype = _json_bytes(
+                        state.plane.sync_github_repository(data["project_id"])
+                    )
+                    self._send(status, body, ctype)
+                    return
+                if path == "/api/github/link-pr":
+                    status, body, ctype = _json_bytes(
+                        state.plane.link_execution_to_pr(
+                            data["execution_id"],
+                            int(data["pr_number"]),
+                            expected_base_ref=data.get("expected_base_ref"),
+                            expected_head_sha=data.get("expected_head_sha"),
+                        )
+                    )
+                    self._send(status, body, ctype)
+                    return
+                if path == "/api/github/reconcile":
+                    status, body, ctype = _json_bytes(
+                        state.plane.reconcile_github_merge(
+                            data["execution_id"],
+                            complete_task=bool(data.get("complete_task", False)),
+                        )
+                    )
                     self._send(status, body, ctype)
                     return
                 status, body, ctype = _json_bytes(

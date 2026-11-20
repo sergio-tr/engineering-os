@@ -89,6 +89,32 @@
     </section>
 
     <section>
+      <h2>GitHub integration <span class="badge">READ-ONLY</span></h2>
+      <p class="meta">Observations are REAL, CACHED or ERROR. Synthetic orchestrator merges stay separate.</p>
+      <form id="form-github" class="stack">
+        <label>Project ID <input name="project_id" id="github-project-id" required /></label>
+        <label>Repository (owner/name) <input name="repository" required placeholder="owner/repo" /></label>
+        <button type="submit">Configure connection</button>
+      </form>
+      <div class="row" style="margin-bottom:0.75rem">
+        <button type="button" id="btn-gh-sync">Refresh observations</button>
+        <button type="button" id="btn-gh-prs">List pull requests</button>
+      </div>
+      <div id="github-panel" class="panel empty">Select a project and configure GitHub</div>
+      <ul id="github-pr-list" class="list"></ul>
+      <form id="form-gh-link" class="stack">
+        <label>Execution ID <input name="execution_id" id="gh-execution-id" required /></label>
+        <label>PR number <input name="pr_number" type="number" min="1" required /></label>
+        <button type="submit">Associate execution ↔ PR</button>
+      </form>
+      <form id="form-gh-reconcile" class="stack">
+        <label>Execution ID <input name="execution_id" id="gh-reconcile-execution" required /></label>
+        <label class="row"><input name="complete_task" type="checkbox" /> Complete task after verified merge</label>
+        <button type="submit" class="synth">Reconcile verified merge</button>
+      </form>
+    </section>
+
+    <section>
       <h2>Operational events</h2>
       <ul id="event-list" class="list compact"></ul>
     </section>

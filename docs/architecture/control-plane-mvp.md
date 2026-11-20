@@ -68,6 +68,15 @@ No live Paperclip, OpenClaw, ACPX, Cursor ACP, or GitHub mutations are started b
 - Live ACP controls are not exposed in the UI
 - SANDBOX gate remains independently governed; this MVP does not declare SANDBOX PASS
 
+## GitHub read-only integration (EOS-04)
+
+- `GitHubReadOnlyClient` uses the GitHub REST API over HTTPS only (stdlib urllib)
+- `GitHubReadOnlyRepositoryAdapter` observes repository/PR/CI/review state
+- Synthetic command methods (`simulate_pr`, `record_owner_merge_decision`) are fail-closed on the real adapter
+- Connections, explicit execution↔PR links and observations persist in SQLite (no tokens stored)
+- Evidence classes distinguish `SYNTHETIC` / `simulated_integration` from `LIVE_READ_ONLY`, `CACHED`, `EXTERNALLY_VERIFIED`, `ERROR`
+- Real network sync occurs only when the Owner configures a connection and invokes sync (token via `EOS_GITHUB_TOKEN`)
+
 ## Assumptions
 
 - Python ≥ 3.10 standard library only (no third-party runtime dependencies)

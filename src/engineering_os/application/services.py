@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 import json
+import os
 
 from engineering_os.domain.models import (
     Approval,
@@ -33,6 +34,22 @@ from engineering_os.infrastructure.adapters import (
     SimulatedRepositoryIntegrationAdapter,
     SyntheticExecutionAdapter,
 )
+from engineering_os.infrastructure.evidence import (
+    CACHED,
+    ERROR,
+    EXTERNALLY_VERIFIED,
+    LIVE_READ_ONLY,
+    UNVERIFIED,
+    is_synthetic,
+)
+from engineering_os.infrastructure.github_adapter import GitHubReadOnlyRepositoryAdapter
+from engineering_os.infrastructure.github_client import (
+    DEFAULT_API_BASE,
+    GitHubClientError,
+    GitHubReadOnlyClient,
+    HttpTransport,
+    parse_repository,
+)
 from engineering_os.infrastructure.sqlite_repo import Repository, default_db_path
 
 # Stable IDs for the persistent synthetic demonstration (idempotent seed).
@@ -59,6 +76,9 @@ class ControlPlane:
         approval_provider: Optional[LocalOwnerDecisionProvider] = None,
         sandbox_gate: str = "NOT_TESTED",
         max_attempts: int = 3,
+        github_transport: Optional[HttpTransport] = None,
+        github_api_base: str = DEFAULT_API_BASE,
+        github_token_provider: Optional[Callable[[], Optional[str]]] = None,
     ) -> None:
         self.repo = repo
         self.synthetic = execution_adapter or SyntheticExecutionAdapter()
@@ -68,6 +88,12 @@ class ControlPlane:
         self.approval_provider = approval_provider or LocalOwnerDecisionProvider()
         self.sandbox_gate = sandbox_gate
         self.max_attempts = max_attempts
+        # Injected transport enables offline fixture demos/tests (no live network).
+        self._github_transport = github_transport
+        self._github_api_base = github_api_base
+        self._github_token_provider = github_token_provider or (
+            lambda: os.environ.get("EOS_GITHUB_TOKEN") or None
+        )
 
     # --- factories ---
     @classmethod
@@ -655,6 +681,421 @@ class ControlPlane:
             "mode": "SYNTHETIC",
             "created": True,
             "idempotent": False,
+        }
+
+    # --- GitHub read-only integration (EOS-04) ---
+    def _runtime_github_token(self) -> Optional[str]:
+        token = self._github_token_provider()
+        if token is not None and not isinstance(token, str):
+            raise PolicyError("invalid_token_provider_result")
+        return token or None
+
+    def _build_github_adapter(
+        self, owner: str, repo: str
+    ) -> GitHubReadOnlyRepositoryAdapter:
+        client = GitHubReadOnlyClient(
+            api_base=self._github_api_base,
+            token=self._runtime_github_token(),
+            transport=self._github_transport,
+        )
+        return GitHubReadOnlyRepositoryAdapter(client, owner=owner, repo=repo)
+
+    def configure_github_connection(
+        self, project_id: str, repository: str, *, api_base: Optional[str] = None
+    ) -> Dict[str, Any]:
+        self.get_project(project_id)
+        owner, repo = parse_repository(repository)
+        base = (api_base or self._github_api_base).rstrip("/")
+        conn = self.repo.upsert_github_connection(
+            {
+                "project_id": project_id,
+                "owner": owner,
+                "repo": repo,
+                "repository_identity": f"{owner}/{repo}",
+                "api_base": base,
+            }
+        )
+        self._emit(
+            aggregate_type="project",
+            aggregate_id=project_id,
+            event_type="github.connection_configured",
+            payload={
+                "repository_identity": conn["repository_identity"],
+                "api_base": conn["api_base"],
+                "token_configured": bool(self._runtime_github_token()),
+            },
+        )
+        # Never include token material in returned payload.
+        return {
+            **conn,
+            "token_configured": bool(self._runtime_github_token()),
+            "mode": "LIVE_READ_ONLY" if not self._github_transport else "FIXTURE",
+        }
+
+    def list_github_connections(self) -> List[Dict[str, Any]]:
+        return [
+            {**c, "token_configured": bool(self._runtime_github_token())}
+            for c in self.repo.list_github_connections()
+        ]
+
+    def github_status(self, project_id: str) -> Dict[str, Any]:
+        self.get_project(project_id)
+        conn = self.repo.get_github_connection(project_id)
+        latest = self.repo.latest_github_observation(project_id=project_id)
+        links = self.repo.list_execution_pr_links(project_id=project_id)
+        return {
+            "project_id": project_id,
+            "connection": conn,
+            "latest_observation": latest,
+            "pr_links": links,
+            "sandbox_gate": self.sandbox_gate,
+            "live_acp_enabled": False,
+            "token_configured": bool(self._runtime_github_token()),
+            "evidence_note": "GitHub observations are read-only; synthetic merges remain separate",
+        }
+
+    def sync_github_repository(self, project_id: str) -> Dict[str, Any]:
+        conn = self.repo.get_github_connection(project_id)
+        if not conn:
+            raise PolicyError("github_connection_not_configured")
+        adapter = self._build_github_adapter(conn["owner"], conn["repo"])
+        meta = adapter.observe_repository()
+        evidence_class = str(meta.get("evidence_class") or ERROR)
+        error = meta.get("error")
+        updated = self.repo.upsert_github_connection(
+            {
+                **conn,
+                "default_branch": meta.get("default_branch"),
+                "head_sha": meta.get("head_sha"),
+                "last_sync_at": utc_now(),
+                "last_error": error,
+            }
+        )
+        obs = self.repo.insert_github_observation(
+            {
+                "observation_id": new_id("ghobs"),
+                "project_id": project_id,
+                "execution_id": None,
+                "repository_identity": conn["repository_identity"],
+                "pr_number": None,
+                "evidence_class": evidence_class,
+                "payload": meta,
+            }
+        )
+        self._emit(
+            aggregate_type="project",
+            aggregate_id=project_id,
+            event_type="github.repository_synced",
+            payload={
+                "repository_identity": conn["repository_identity"],
+                "evidence_class": evidence_class,
+                "observation_id": obs["observation_id"],
+                "error": error,
+            },
+        )
+        return {
+            "connection": updated,
+            "observation": obs,
+            "metadata": meta,
+            "token_configured": bool(self._runtime_github_token()),
+        }
+
+    def list_github_pull_requests(
+        self, project_id: str, *, state: str = "all", use_cache: bool = False
+    ) -> Dict[str, Any]:
+        conn = self.repo.get_github_connection(project_id)
+        if not conn:
+            raise PolicyError("github_connection_not_configured")
+        if use_cache:
+            cached = self.repo.latest_github_observation(project_id=project_id)
+            if cached and cached.get("payload", {}).get("pull_requests") is not None:
+                payload = dict(cached["payload"])
+                payload["evidence_class"] = CACHED
+                payload["stale"] = cached.get("stale", False)
+                return payload
+        adapter = self._build_github_adapter(conn["owner"], conn["repo"])
+        try:
+            prs = adapter.list_pull_requests(state=state)
+            evidence_class = LIVE_READ_ONLY
+            error = None
+        except GitHubClientError as exc:
+            prs = []
+            evidence_class = ERROR
+            error = {"code": exc.code, "status": exc.status, "message": str(exc)}
+        payload = {
+            "repository_identity": conn["repository_identity"],
+            "pull_requests": prs,
+            "evidence_class": evidence_class,
+            "error": error,
+            "state_filter": state,
+        }
+        obs = self.repo.insert_github_observation(
+            {
+                "observation_id": new_id("ghobs"),
+                "project_id": project_id,
+                "repository_identity": conn["repository_identity"],
+                "evidence_class": evidence_class,
+                "payload": payload,
+            }
+        )
+        return {**payload, "observation_id": obs["observation_id"]}
+
+    def link_execution_to_pr(
+        self,
+        execution_id: str,
+        pr_number: int,
+        *,
+        expected_base_ref: Optional[str] = None,
+        expected_head_sha: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        execution = self._require_execution(execution_id)
+        conn = self.repo.get_github_connection(execution.project_id)
+        if not conn:
+            raise PolicyError("github_connection_not_configured")
+        if pr_number <= 0:
+            raise PolicyError("invalid_pr_number")
+        # Explicit association only — never inferred from titles/branches.
+        link = self.repo.upsert_execution_pr_link(
+            {
+                "execution_id": execution_id,
+                "project_id": execution.project_id,
+                "repository_identity": conn["repository_identity"],
+                "pr_number": pr_number,
+                "expected_base_ref": expected_base_ref,
+                "expected_head_sha": expected_head_sha,
+            }
+        )
+        self._emit(
+            aggregate_type="execution",
+            aggregate_id=execution_id,
+            event_type="github.pr_linked",
+            payload={
+                "pr_number": pr_number,
+                "repository_identity": conn["repository_identity"],
+            },
+        )
+        return link
+
+    def sync_linked_pull_request(self, execution_id: str) -> Dict[str, Any]:
+        execution = self._require_execution(execution_id)
+        link = self.repo.get_execution_pr_link(execution_id)
+        if not link:
+            raise PolicyError("execution_pr_link_required")
+        conn = self.repo.get_github_connection(execution.project_id)
+        if not conn:
+            raise PolicyError("github_connection_not_configured")
+        if link["repository_identity"] != conn["repository_identity"]:
+            raise PolicyError("repository_mismatch")
+        adapter = self._build_github_adapter(conn["owner"], conn["repo"])
+        observation = adapter.observe(
+            execution.project_id,
+            execution_id,
+            pr_number=int(link["pr_number"]),
+        )
+        # Validate expected associations when provided.
+        details = dict(observation.details or {})
+        mismatches: List[str] = []
+        if link.get("expected_base_ref") and details.get("base_ref") not in {
+            None,
+            link["expected_base_ref"],
+        }:
+            mismatches.append("base_ref")
+        if link.get("expected_head_sha") and details.get("head_sha") not in {
+            None,
+            link["expected_head_sha"],
+        }:
+            mismatches.append("head_sha")
+        if mismatches:
+            observation.evidence_class = ERROR
+            details["association_mismatch"] = mismatches
+            observation.details = details
+        stored = self.repo.insert_github_observation(
+            {
+                "observation_id": new_id("ghobs"),
+                "project_id": execution.project_id,
+                "execution_id": execution_id,
+                "repository_identity": conn["repository_identity"],
+                "pr_number": int(link["pr_number"]),
+                "evidence_class": observation.evidence_class,
+                "payload": observation.to_dict(),
+            }
+        )
+        self._emit(
+            aggregate_type="execution",
+            aggregate_id=execution_id,
+            event_type="github.pr_synced",
+            payload={
+                "observation_id": stored["observation_id"],
+                "evidence_class": observation.evidence_class,
+                "pr_state": observation.pr_state,
+            },
+        )
+        return {
+            "link": link,
+            "observation": stored,
+            "live": observation.to_dict(),
+        }
+
+    def reconcile_github_merge(
+        self, execution_id: str, *, complete_task: bool = False
+    ) -> Dict[str, Any]:
+        """Reconcile against a real GitHub observation path only.
+
+        Synthetic Owner merge decisions are intentionally excluded.
+        """
+        execution = self._require_execution(execution_id)
+        # Refuse to treat synthetic integration evidence as real.
+        if execution.integration_state in {"merged_synthetic", "pr_pending"} and (
+            execution.runner_type == "SYNTHETIC"
+            and not self.repo.get_execution_pr_link(execution_id)
+        ):
+            # Still allow linking later; without an explicit PR link we cannot reconcile.
+            pass
+        link = self.repo.get_execution_pr_link(execution_id)
+        if not link:
+            raise PolicyError("execution_pr_link_required")
+        synced = self.sync_linked_pull_request(execution_id)
+        live = synced["live"]
+        evidence_class = live.get("evidence_class")
+        if is_synthetic(str(evidence_class)):
+            raise PolicyError("synthetic_evidence_cannot_reconcile_github")
+        if evidence_class == ERROR:
+            return {
+                "action": "reconcile_failed",
+                "reason": "observation_error",
+                "observation": synced["observation"],
+            }
+        if live.get("pr_state") != "merged":
+            return {
+                "action": "not_merged",
+                "observation": synced["observation"],
+                "evidence_class": evidence_class,
+            }
+        if not live.get("merge_commit_sha"):
+            return {
+                "action": "unverified",
+                "reason": "missing_merge_commit_sha",
+                "observation": synced["observation"],
+                "evidence_class": UNVERIFIED,
+            }
+        # Externally verified merge observation recorded.
+        version = execution.version
+        execution.integration_state = "merged_github_verified"
+        execution.evidence_refs = list(execution.evidence_refs) + [
+            f"github-merge:{live['merge_commit_sha']}",
+            f"evidence:{EXTERNALLY_VERIFIED}",
+        ]
+        # Mark observation provenance as externally verified for audit.
+        verified = self.repo.insert_github_observation(
+            {
+                "observation_id": new_id("ghobs"),
+                "project_id": execution.project_id,
+                "execution_id": execution_id,
+                "repository_identity": link["repository_identity"],
+                "pr_number": int(link["pr_number"]),
+                "evidence_class": EXTERNALLY_VERIFIED,
+                "payload": {
+                    **live,
+                    "evidence_class": EXTERNALLY_VERIFIED,
+                    "note": "verified against GitHub merged state + merge SHA",
+                },
+            }
+        )
+        if complete_task and execution.status == "AWAITING_INTEGRATION":
+            assert_transition(
+                "execution", execution.status, "SUCCEEDED", EXECUTION_TRANSITIONS
+            )
+            execution.status = "SUCCEEDED"
+            execution.ended_at = utc_now()
+            execution = self.repo.update_execution(execution, expected_version=version)
+            task = self._require_task(execution.task_id)
+            t_version = task.version
+            if task.lifecycle_state == "RUNNING":
+                assert_transition("task", "RUNNING", "REVIEW", TASK_TRANSITIONS)
+                task.lifecycle_state = "REVIEW"
+                task = self.repo.update_task(task, expected_version=t_version)
+                t_version = task.version
+            if task.lifecycle_state == "REVIEW":
+                assert_transition("task", "REVIEW", "DONE", TASK_TRANSITIONS)
+                task.lifecycle_state = "DONE"
+                task.execution_eligible = False
+                self.repo.update_task(task, expected_version=t_version)
+            self.repo.clear_claim(execution.project_id)
+            self.recalculate_task_eligibility(project_id=execution.project_id)
+            action = "reconciled_and_completed"
+        else:
+            execution = self.repo.update_execution(execution, expected_version=version)
+            action = "reconciled_verified"
+        self._emit(
+            aggregate_type="execution",
+            aggregate_id=execution_id,
+            event_type="github.merge_reconciled",
+            payload={
+                "action": action,
+                "merge_commit_sha": live.get("merge_commit_sha"),
+                "evidence_class": EXTERNALLY_VERIFIED,
+                "observation_id": verified["observation_id"],
+                "complete_task": complete_task,
+            },
+        )
+        return {
+            "action": action,
+            "execution": execution.to_dict(),
+            "observation": verified,
+            "evidence_class": EXTERNALLY_VERIFIED,
+            "synthetic_path_used": False,
+        }
+
+    def cached_github_observation(
+        self, project_id: str, *, execution_id: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
+        obs = self.repo.latest_github_observation(
+            project_id=project_id, execution_id=execution_id, include_stale=True
+        )
+        if not obs:
+            return None
+        payload = dict(obs)
+        if obs.get("stale"):
+            payload["evidence_class"] = CACHED
+            payload["display_class"] = CACHED
+        return payload
+
+    def run_github_fixture_demo(self) -> Dict[str, Any]:
+        """Offline deterministic GitHub integration demonstration."""
+        if self._github_transport is None:
+            raise PolicyError("fixture_transport_required_for_offline_demo")
+        project = self.create_project(
+            "GitHub Integration Demo", "sergio-tr/engineering-os-demo"
+        )
+        goal = self.create_goal(project.project_id, "Observe real PR fixtures")
+        task = self.create_task(goal.goal_id, "Link and reconcile fixture PR")
+        self.approve_goal(goal.goal_id)
+        execution = self.simulate_task(task.task_id)
+        conn = self.configure_github_connection(
+            project.project_id, "sergio-tr/engineering-os"
+        )
+        sync = self.sync_github_repository(project.project_id)
+        prs = self.list_github_pull_requests(project.project_id)
+        link = self.link_execution_to_pr(
+            execution.execution_id,
+            42,
+            expected_base_ref="main",
+        )
+        synced = self.sync_linked_pull_request(execution.execution_id)
+        # Restart persistence check is done by caller with same DB path.
+        return {
+            "mode": "FIXTURE_OFFLINE",
+            "project_id": project.project_id,
+            "connection": conn,
+            "sync": {
+                "evidence_class": sync["observation"]["evidence_class"],
+                "head_sha": sync["connection"].get("head_sha"),
+            },
+            "pull_requests": prs.get("pull_requests"),
+            "link": link,
+            "synced_observation": synced["observation"],
+            "execution_id": execution.execution_id,
+            "note": "No live GitHub network requests were performed",
         }
 
     # --- helpers ---
