@@ -18,7 +18,7 @@ tasks:
   - id: M00-02
     milestone: M00
     title: Versioned canonical contracts
-    status: READY
+    status: PASS
     depends_on:
       - M00-01
     gate: DOCUMENTATION
@@ -26,7 +26,7 @@ tasks:
   - id: M01-00
     milestone: M01
     title: Cursor CLI ACP discovery
-    status: PLANNED
+    status: READY
     depends_on:
       - M00-00
     gate: ACP
