@@ -94,7 +94,7 @@ tasks:
   - id: M03-01
     milestone: M03
     title: Effective external isolation PoC
-    status: PLANNED
+    status: PASS
     depends_on:
       - M03-00
     gate: SANDBOX
