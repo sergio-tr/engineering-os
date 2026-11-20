@@ -1,67 +1,108 @@
-# M03-01 validation — External sandbox PoC (Phase B3 userns evidence)
+# M03-01 validation — External sandbox PoC (closure record)
 
 **Explicit statements:**
 
-- No OCI container was executed in this B3 implementation pass.
-- No image was pulled.
-- No live Cursor ACP session occurred.
-- Historical B2 evidence (`p6-b2.json`) is retained and **not** rewritten.
-- B2 accredited CPU and capabilities; B2 `userns_keep_id` remains FAIL in that archive.
-- B3 host-side userns attribution remains **NOT_TESTED** until Owner-authorized execute.
-- SANDBOX gate remains **NOT_TESTED**.
-- M03-01 remains **PLANNED**.
+- M03-01 is proposed **PASS** as a synthetic PoC only.
+- The SANDBOX gate remains **NOT_TESTED**.
+- Live Cursor ACP remains **BLOCKED** (depends on M03-02).
+- Historical evidence files were **not** rewritten during closure.
+- This document consolidates Owner-reported executions; it is **not** the M03-02 independent audit report.
 
-## B2 defect (mapping semantics)
+## Provenance classes
 
-`id_maps_cover_identity()` treated the second column of an in-container `uid_map` as the launching host UID. That column is reader-relative. Nested rootless Podman can yield `1000 0 1` inside the container while the composed path is still `1000 → 0 → 1000` on the host. B3 rejects in-container maps as host proof.
+| Class | Meaning |
+|-------|---------|
+| Owner-reported | Runtime JSON archived by Owner after triple-gate execute |
+| Locally verified (closure) | File presence + SHA-256 manifest check during consolidation |
+| Not independently audited | Content semantics / threat coverage pending M03-02 |
 
-## B3 host-side evidence model
+## Code SHAs
 
-| Step | Evidence |
-|------|----------|
-| 1 | Start synthetic identity container (unchanged isolation flags); hold bounded window |
-| 2 | Resolve PID via `podman inspect`; link PID ↔ container id |
-| 3 | Record `/proc/<pid>/stat` starttime; re-check after sampling (PID-reuse guard) |
-| 4 | Read `/proc/<pid>/uid_map`, `gid_map`, `ns/user`, `status` **from the launcher** |
-| 5 | Tag maps with `reader_context=launching_host` |
-| 6 | Translate container euid/egid through those maps to launching UID/GID |
-| 7 | Verify workspace + marker ownership UID **and** GID |
-| 8 | Force cleanup; confirm absence |
+| Label | SHA |
+|-------|-----|
+| B2 merge on `main` | `0f68c17501dc1b29e23cf5148189e13679565838` |
+| B3 merge on `main` (PR #9) | `b47eb8ba1340aab44d5f234dc58687048c5b6619` |
 
-PASS requires all of the above. Missing/stale/ambiguous evidence → `NOT_TESTED` or `FAIL`. Pattern `1000 0 1` alone never PASS.
+PR #9 CI/check/review status: **not verified** in this closure (no usable GitHub check entries observed). Local `main` contains `b47eb8ba…`.
 
-## `--security-identity-only`
+## Catalog and security-control results (Owner-reported)
 
-| Property | Behavior |
-|----------|----------|
-| Dry-run | Plans probe only; `execution_performed=false`; `p6_executed=false` |
-| Execute | Requires triple Owner gate; runs identity probe only |
-| Catalog | Does not mark P1–P8 as executed |
-| Output | `security_controls` + `security_identity_result` |
+| Evidence | Result | Code context |
+|----------|--------|--------------|
+| P1 | PASS | Pre-B2 / B1 harness |
+| P2–P4 | PASS | Pre-B2 / B1 harness |
+| P5 | PASS | Pre-B2 / B1 harness |
+| P6 initial | Partial (CPU NOT_TESTED) | Pre-B2 |
+| P6-B2 | PASS (memory/PIDs/time/CPU); caps PASS; userns FAIL | `0f68c175…` |
+| P7 | PASS | Pre-B2 / B1 harness |
+| P8 | PASS | Pre-B2 / B1 harness |
+| B3 identity | PASS (`userns_keep_id`, caps); `p6_executed=false` | `b47eb8ba…` |
 
-## Static validation (this pass)
+### B2 CPU / capability highlights (Owner-reported)
+
+- `cpu.max`: `50000 100000` (0.50 CPUs)
+- Throttle delta: `nr_throttled +50`
+- CapPrm/Eff/Bnd/Amb: zero; NoNewPrivs=1
+- Userns: FAIL (`id_map_does_not_match_host_identity`) — defect corrected in B3; FAIL record retained
+
+### B3 identity highlights (Owner-reported)
+
+- Host-side `/proc/<pid>/{uid,gid}_map` with `reader_context=launching_host`
+- PID linked to container; stable `starttime`
+- Effective UID/GID `1000:1001`; maps `1000→1000`, `1001→1001`
+- Marker ownership `1000:1001`
+- Cleanup verified; no residual `eos-sandbox-poc-*`
+
+## Evidence integrity (locally verified at closure)
+
+Store: `~/.local/share/engineering-os/evidence/m03-01/`
+
+| File | SHA-256 |
+|------|---------|
+| `p1.json` | `3fe9481223de3f58af68ae2c66121ed1692aea74aa7cf2cf8ce79f3e68862d7e` |
+| `p234.json` | `8576372a760bb6ae8894a64ca8294fad6d44ed3e7817930aaaaa4844c673693b` |
+| `p5.json` | `1876bfb50db780e528e72ad41fc8b21adf88f4162253eccda416282137cf6949` |
+| `p6.json` | `2f37147e24cfceb0aa280dd81a60e75205f72189ebb560af59698762a80097be` |
+| `p6-b2.json` | `51f92e993eb8c6b15f74540fd935315ec71fcc4bf61607f5b8fe55857c88dacd` |
+| `p7.json` | `0f16a4f28e30546ae1c22d875adc6e0e5418f2813fd5811b33855a2f0bb6d31d` |
+| `p8.json` | `4abcdebe44207d513026ca9d09cc362885789f436c9a6a1f14a7d8bb718953bd` |
+| `userns-b3.json` | `237c04a18d7abef3b602bb3f20263f70f93a0f4c9a397adc89aa5c9abf01b35f` |
+
+`sha256sum -c evidence-manifest.sha256` → all OK at consolidation.
+
+## Mapping to PoC negative tests (design N1–N8)
+
+| Design ID | Covered by M03-01? | Evidence |
+|-----------|--------------------|----------|
+| N1 outside write | Yes | P2 |
+| N2 sibling project | Yes | P3 |
+| N3 host-secret canary | Yes | P4 |
+| N4 network deny | Yes | P5 |
+| N5 runtime socket | Yes | P8 |
+| N6 SSH agent | **No dedicated negative test** | Env scrub configured; N6 remains for M03-02 |
+| N7 resource/time | Yes (CPU/mem/PIDs/time) | P6 / P6-B2; **disk quota not specifically attributed** |
+| N8 cleanup | Yes | P7 (+ B2/B3 cleanups) |
+
+## Residual items deferred to M03-02
+
+1. Workspace **disk** quota behavioral proof.
+2. Explicit **SSH agent** and **GitHub credential** negative tests (N6 / T4 / T5).
+3. Explicit **PID/IPC** namespace isolation proof.
+4. Independent review of evidence integrity, false positives, and threat coverage T1–T12.
+5. Future ACP launcher path compatibility **without** starting live ACP.
+6. Reproducibility audit on the declared WSL2 environment by an independent reviewer.
+
+## Closure validation (this documentary pass)
 
 | Check | Result |
 |-------|--------|
-| AST/syntax | Executed |
-| assertions self-check (nested/host-side cases) | Executed |
-| Contract validation | Executed |
-| `--security-identity-only` dry-run | Executed (no containers) |
-| Container launch | **Not performed** |
+| Evidence files present | PASS (8/8) |
+| SHA-256 manifest | PASS (`sha256sum -c`) |
+| Container execute during closure | **Not performed** |
+| SANDBOX gate | **NOT_TESTED** |
 
-## Owner-only execute (later; B3)
+## Decision
 
-```bash
-python3 -B scripts/sandbox/run_poc.py \
-  --execute --allow-phase-b --owner-authorize-runtime-execution \
-  --security-identity-only --json
-```
+M03-01 synthetic PoC: **PASS** (documentary consolidation).
 
-Archive as `p6-b3-userns.json` (or `security-identity-b3.json`) beside historical `p6-b2.json`. Record matching `main` SHA.
-
-## Remaining limitations
-
-1. Host-side `/proc/<pid>` must be readable by the launcher; otherwise fail closed.
-2. Nested composition fallback requires an independently proven parent relationship (not assumed from `podman unshare` alone).
-3. Historical B2 userns FAIL is preserved for audit trail.
-4. M03-02 independent audit still required before SANDBOX PASS.
+Next: execute `docs/tasks/M03-02.md` / `docs/validation/M03-02-independent-audit.md` as an **independent** audit; do not treat this file as that audit.
