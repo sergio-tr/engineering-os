@@ -1,0 +1,58 @@
+# AGENTS.md — declarative policy for agents
+
+This file sets behavior rules for any agent working in this repository.
+
+**Important:** `AGENTS.md` is a **declarative policy**. It is not a sandbox, it does not enforce isolation, and it is not a security enforcement mechanism. Task prompt restrictions prevail when they are stricter.
+
+## English-only repository policy
+
+All content sent to engineering agents and all content committed to this repository **must be written in English**.
+
+This includes:
+
+- Agent instructions and prompts.
+- Documentation and ADRs.
+- Source code, comments, tests, and configuration.
+- Task names, status descriptions, identifiers, and gate names.
+- Commit messages, pull request titles, descriptions, and review reports.
+
+Conversations between the human Owner and the Principal Software Architect may be in Spanish. That exception does **not** apply to repository artifacts or Cursor instructions.
+
+## Execution scope
+
+1. Execute **only** the increment authorized by the current task.
+2. Respect the allow-list of files, commands, and operations for that task.
+3. Stop on blockers, insufficient permissions, ambiguous scope, or conflict with these rules.
+4. Do not expand work into future milestones without explicit authorization.
+
+## Prohibitions
+
+1. **Do not** perform Git write operations (`add`, `commit`, `push`, `pull`, `fetch`, `checkout`, `switch`, `merge`, `reset`, `restore`, `stash`, `clean`, branch creation, tags, etc.).
+2. **Do not** modify other repositories.
+3. **Do not** install tools, packages, or services without explicit human authorization.
+4. **Do not** alter global configs, credentials, secrets, service units, or existing processes without authorization.
+5. **Do not** run remote, unnecessary network, or cost-incurring actions without authorization.
+6. **Do not** disclose secrets, tokens, keys, private config contents, or unnecessary personal paths in a public repository.
+7. **Do not** declare `PASS` without verifiable external evidence.
+8. **Do not** treat `cwd`, prompts, rules, or this file as sufficient isolation between projects.
+
+## Required delivery when closing an increment
+
+Every agent report must include at least:
+
+- Commands run and relevant exit codes.
+- Tests performed and their outcome (`PASS` / `FAIL` / `NOT_TESTED` / `BLOCKED`).
+- Files created or modified.
+- Diff summary or review of new untracked content.
+- Risks, limitations, and blockers.
+- Pending human actions (Git integration, authorizations, decisions).
+
+## Evidence and honesty
+
+- Distinguish executed tests, third-party provided results, and inferred conclusions.
+- Do not invent PASS, CI, deployments, or undemonstrated capabilities.
+- If a check cannot be performed safely or with authorization, mark it `NOT_TESTED` and explain the blocker.
+
+## Integration
+
+Git integration (staging, commit, push, PR, merge) is **human-only** during the MVP, unless the owner gives written instructions otherwise.
