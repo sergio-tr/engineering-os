@@ -45,6 +45,19 @@ Provenance `argv_scan_only` / `launcher_argv` fails closed.
 | R5 | Named containers, inspect-aware presence, forced cleanup, timeout reaping |
 | R6 | Safety constraints preserved; fail-closed not weakened |
 
+## Runtime blocker fix (socket-probe false positive)
+
+| Field | Value |
+|-------|--------|
+| Owner attempt | P1 only, triple Owner gate |
+| Result | **BLOCKED** before execution (exit 2) |
+| Error | `FAIL_CLOSED: refusing forbidden command element: docker.sock` |
+| Container started | **no** |
+| Root cause | Full-argv string scan treated P8 workload socket path literals as forbidden launcher config; eager full-catalog construction made `--tests P1` fail while building P8 |
+| Fix | Split launcher opts / mounts from workload; reject socket **mounts** only; construct only selected allow-listed tests |
+| P1 status after fix | Still **NOT_TESTED** (prior attempt BLOCKED; no PASS claimed) |
+| SANDBOX | **NOT_TESTED** |
+
 ## Current host readiness
 
 | Capability | Observation |
