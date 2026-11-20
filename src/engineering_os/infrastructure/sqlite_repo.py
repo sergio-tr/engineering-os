@@ -229,6 +229,34 @@ CREATE TABLE IF NOT EXISTS acp_session_events (
 
 CREATE INDEX IF NOT EXISTS idx_acp_sess_project ON acp_sessions(project_id, status);
 CREATE INDEX IF NOT EXISTS idx_acp_evt_session ON acp_session_events(session_id, sequence);
+
+CREATE TABLE IF NOT EXISTS runtime_preparations (
+  preparation_id TEXT PRIMARY KEY,
+  execution_id TEXT NOT NULL UNIQUE,
+  project_id TEXT NOT NULL,
+  task_id TEXT NOT NULL,
+  spec_id TEXT NOT NULL,
+  spec_json TEXT NOT NULL,
+  acpx_session_id TEXT,
+  cursor_session_id TEXT,
+  readiness_json TEXT NOT NULL,
+  authorization_state TEXT NOT NULL,
+  image_digest TEXT NOT NULL,
+  status TEXT NOT NULL,
+  mode TEXT NOT NULL,
+  blocked_reasons_json TEXT NOT NULL,
+  launch_plan_json TEXT NOT NULL,
+  evidence_refs_json TEXT NOT NULL,
+  cleanup_status TEXT,
+  failure_reason TEXT,
+  correlation_id TEXT NOT NULL,
+  provenance_json TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  started_at TEXT,
+  completed_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_rtprep_project ON runtime_preparations(project_id, status);
 """
 
 
@@ -1235,6 +1263,138 @@ class Repository:
             }
             for r in rows
         ]
+
+    def insert_runtime_preparation(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        with self.transaction() as conn:
+            conn.execute(
+                """
+                INSERT INTO runtime_preparations(
+                  preparation_id, execution_id, project_id, task_id, spec_id,
+                  spec_json, acpx_session_id, cursor_session_id, readiness_json,
+                  authorization_state, image_digest, status, mode,
+                  blocked_reasons_json, launch_plan_json, evidence_refs_json,
+                  cleanup_status, failure_reason, correlation_id, provenance_json,
+                  created_at, started_at, completed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    data["preparation_id"],
+                    data["execution_id"],
+                    data["project_id"],
+                    data["task_id"],
+                    data["spec_id"],
+                    dumps_json(data.get("spec_json") or {}),
+                    data.get("acpx_session_id"),
+                    data.get("cursor_session_id"),
+                    dumps_json(data.get("readiness_json") or {}),
+                    data["authorization_state"],
+                    data["image_digest"],
+                    data["status"],
+                    data["mode"],
+                    dumps_json(data.get("blocked_reasons") or []),
+                    dumps_json(data.get("launch_plan_json") or {}),
+                    dumps_json(data.get("evidence_refs") or []),
+                    data.get("cleanup_status"),
+                    data.get("failure_reason"),
+                    data["correlation_id"],
+                    dumps_json(data.get("provenance") or {}),
+                    data["created_at"],
+                    data.get("started_at"),
+                    data.get("completed_at"),
+                ),
+            )
+        return self.get_runtime_preparation(data["preparation_id"])  # type: ignore[return-value]
+
+    def update_runtime_preparation(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        with self.transaction() as conn:
+            conn.execute(
+                """
+                UPDATE runtime_preparations SET
+                  acpx_session_id=?, cursor_session_id=?, readiness_json=?,
+                  authorization_state=?, status=?, mode=?, blocked_reasons_json=?,
+                  launch_plan_json=?, evidence_refs_json=?, cleanup_status=?,
+                  failure_reason=?, provenance_json=?, started_at=?, completed_at=?
+                WHERE preparation_id=?
+                """,
+                (
+                    data.get("acpx_session_id"),
+                    data.get("cursor_session_id"),
+                    dumps_json(data.get("readiness_json") or {}),
+                    data["authorization_state"],
+                    data["status"],
+                    data["mode"],
+                    dumps_json(data.get("blocked_reasons") or []),
+                    dumps_json(data.get("launch_plan_json") or {}),
+                    dumps_json(data.get("evidence_refs") or []),
+                    data.get("cleanup_status"),
+                    data.get("failure_reason"),
+                    dumps_json(data.get("provenance") or {}),
+                    data.get("started_at"),
+                    data.get("completed_at"),
+                    data["preparation_id"],
+                ),
+            )
+        return self.get_runtime_preparation(data["preparation_id"])  # type: ignore[return-value]
+
+    def get_runtime_preparation(self, preparation_id: str) -> Optional[Dict[str, Any]]:
+        row = self._fetchone(
+            "SELECT * FROM runtime_preparations WHERE preparation_id=?",
+            (preparation_id,),
+        )
+        return self._row_runtime_preparation(row) if row else None
+
+    def get_runtime_preparation_by_execution(
+        self, execution_id: str
+    ) -> Optional[Dict[str, Any]]:
+        row = self._fetchone(
+            "SELECT * FROM runtime_preparations WHERE execution_id=?",
+            (execution_id,),
+        )
+        return self._row_runtime_preparation(row) if row else None
+
+    def list_runtime_preparations(
+        self, *, project_id: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        if project_id:
+            rows = self._fetchall(
+                """
+                SELECT * FROM runtime_preparations
+                WHERE project_id=? ORDER BY created_at ASC
+                """,
+                (project_id,),
+            )
+        else:
+            rows = self._fetchall(
+                "SELECT * FROM runtime_preparations ORDER BY created_at ASC"
+            )
+        return [self._row_runtime_preparation(r) for r in rows]
+
+    def _row_runtime_preparation(self, row: sqlite3.Row) -> Dict[str, Any]:
+        return {
+            "preparation_id": row["preparation_id"],
+            "execution_id": row["execution_id"],
+            "project_id": row["project_id"],
+            "task_id": row["task_id"],
+            "spec_id": row["spec_id"],
+            "spec_json": dict(loads_json(row["spec_json"]) or {}),
+            "acpx_session_id": row["acpx_session_id"],
+            "cursor_session_id": row["cursor_session_id"],
+            "readiness_json": dict(loads_json(row["readiness_json"]) or {}),
+            "authorization_state": row["authorization_state"],
+            "image_digest": row["image_digest"],
+            "status": row["status"],
+            "mode": row["mode"],
+            "blocked_reasons": list(loads_json(row["blocked_reasons_json"]) or []),
+            "launch_plan_json": dict(loads_json(row["launch_plan_json"]) or {}),
+            "evidence_refs": list(loads_json(row["evidence_refs_json"]) or []),
+            "cleanup_status": row["cleanup_status"],
+            "failure_reason": row["failure_reason"],
+            "correlation_id": row["correlation_id"],
+            "provenance": dict(loads_json(row["provenance_json"]) or {}),
+            "created_at": row["created_at"],
+            "started_at": row["started_at"],
+            "completed_at": row["completed_at"],
+        }
 
     def _row_acp_session(self, row: sqlite3.Row) -> Dict[str, Any]:
         return {

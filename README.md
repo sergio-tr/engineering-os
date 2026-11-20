@@ -109,6 +109,25 @@ Synthetic ACP sessions use real JSON-RPC message handling and durable SQLite
 persistence. Live OpenClaw→ACPX→Cursor dispatch remains blocked while SANDBOX is
 `NOT_TESTED`. There is no dashboard control that starts live ACP.
 
+### ACPX / sandbox bridge (EOS-07)
+
+```bash
+# Offline bridge demo (mock sandbox + synthetic ACP; no containers/agents)
+python3 scripts/eos.py acpx demo-fixture --temp
+
+python3 scripts/eos.py runtime status
+python3 scripts/eos.py runtime inspect
+python3 scripts/eos.py sandbox readiness
+python3 scripts/eos.py sandbox plan --execution-id EXECUTION_ID
+python3 scripts/eos.py acpx status
+python3 scripts/eos.py acpx sessions
+```
+
+OpenClaw ACP sessions normally run on the host; Engineering OS routes Cursor through
+a sandbox-enforced launcher specification. Real launches remain blocked without
+trusted host-side authorization and verified enforcement. A UI `sandbox_gate=PASS`
+string alone is not sufficient.
+
 ## Candidate architecture (provisional)
 
 The priority candidate chain is:

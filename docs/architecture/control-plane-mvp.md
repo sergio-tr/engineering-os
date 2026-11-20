@@ -96,6 +96,24 @@ Implemented locally:
 Synthetic ACP success is not real Cursor execution. Live OpenClaw→ACPX→Cursor dispatch
 remains blocked until an externally enforced sandbox launcher authorizes it.
 
+## ACPX sandbox bridge (EOS-07)
+
+Intended topology: ControlPlane → SequentialOrchestrator → trusted authorization →
+OpenClaw/ACPX session control → sandbox-enforced Cursor ACP launcher → rootless Podman →
+Cursor ACP inside an isolated OCI environment.
+
+Implemented locally:
+
+- Gateway client over injected transports (`operator.read` scopes; no silent pairing)
+- Itemized ACPX/Cursor/sandbox readiness (not a single boolean)
+- `SandboxExecutionSpec` + fail-closed Podman argv planner
+- Host-side runtime authorization model (issuance disabled outside test fixtures)
+- Durable `runtime_preparations` records
+- Synthetic bridge demo (`eos acpx demo-fixture --temp`) with mock sandbox + ACP
+
+Critical constraint: OpenClaw ACP harnesses run on the host; `sandbox=require` is not
+ACP isolation evidence. Direct host Cursor ACP and unauthenticated launches stay rejected.
+
 ## Assumptions
 
 - Python ≥ 3.10 standard library only (no third-party runtime dependencies)

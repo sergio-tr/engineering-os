@@ -58,6 +58,12 @@ from engineering_os.infrastructure.acp_transport import (
     InMemoryAcpTransport,
     OpenClawAcpxExecutionTransport,
 )
+from engineering_os.infrastructure.acpx_bridge import AcpxSandboxBridge
+from engineering_os.infrastructure.gateway_client import (
+    InMemoryGatewayTransport,
+    OpenClawGatewayClient,
+    default_gateway_client,
+)
 from engineering_os.infrastructure.openclaw_adapter import OpenClawCoordinatorAdapter
 from engineering_os.infrastructure.openclaw_client import OpenClawCliClient
 from engineering_os.infrastructure.paperclip_adapter import PaperclipOrganizationAdapter
@@ -66,6 +72,10 @@ from engineering_os.infrastructure.paperclip_client import (
     PaperclipClient,
     PaperclipClientError,
 )
+from engineering_os.infrastructure.runtime_authorization import (
+    RuntimeAuthorizationVerifier,
+)
+from engineering_os.infrastructure.sandbox_launcher import PodmanAcpSandboxLauncher
 from engineering_os.infrastructure.sqlite_repo import Repository, default_db_path
 
 # Stable IDs for the persistent synthetic demonstration (idempotent seed).
@@ -101,6 +111,8 @@ class ControlPlane:
         paperclip_company_id: Optional[str] = None,
         openclaw_client: Optional[OpenClawCliClient] = None,
         acp_scenario: str = "success",
+        gateway_client: Optional[OpenClawGatewayClient] = None,
+        acpx_bridge: Optional[AcpxSandboxBridge] = None,
     ) -> None:
         self.repo = repo
         self.synthetic = execution_adapter or SyntheticExecutionAdapter()
@@ -132,6 +144,13 @@ class ControlPlane:
         self._acp_scenario = acp_scenario
         self.acp = AcpExecutionAdapter(
             repo, sandbox_gate=sandbox_gate, synthetic_scenario=acp_scenario
+        )
+        self.gateway = gateway_client or default_gateway_client()
+        self.acpx = acpx_bridge or AcpxSandboxBridge(
+            repo,
+            gateway=self.gateway,
+            sandbox=PodmanAcpSandboxLauncher(),
+            sandbox_gate=sandbox_gate,
         )
 
     # --- factories ---
@@ -1672,6 +1691,211 @@ class ControlPlane:
             "plan": plan,
             "live_acp_enabled": False,
             "note": "No live Paperclip/OpenClaw network or process calls in fixture mode",
+        }
+
+    # --- EOS-07 runtime / ACPX / sandbox bridge ---
+    def runtime_status(self) -> Dict[str, Any]:
+        return self.acpx.runtime_status()
+
+    def runtime_inspect(self) -> Dict[str, Any]:
+        return self.acpx.inspect()
+
+    def sandbox_readiness(self) -> Dict[str, Any]:
+        return self.acpx.sandbox.readiness()
+
+    def sandbox_plan(self, execution_id: str) -> Dict[str, Any]:
+        prep = self.repo.get_runtime_preparation_by_execution(execution_id)
+        if prep:
+            return {
+                "preparation": prep,
+                "launch_plan": prep.get("launch_plan_json"),
+                "real_launch_blocked": True,
+            }
+        execution = self.repo.get_execution(execution_id)
+        if not execution:
+            raise KeyError(f"unknown execution: {execution_id}")
+        spec = self.acpx.build_spec_for_execution(
+            execution_id=execution.execution_id,
+            project_id=execution.project_id,
+            task_id=execution.task_id,
+            correlation_id=execution.idempotency_key,
+            idempotency_key=execution.idempotency_key,
+        )
+        plan = self.acpx.sandbox.plan(spec)
+        return {
+            "spec": spec.to_dict(),
+            "launch_plan": plan.to_dict(),
+            "real_launch_blocked": True,
+        }
+
+    def acpx_status(self) -> Dict[str, Any]:
+        return {
+            **self.runtime_status(),
+            "bypass_sessions_spawn": self.acpx.reject_sessions_spawn_bypass(),
+        }
+
+    def acpx_sessions(self, project_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        return self.repo.list_runtime_preparations(project_id=project_id)
+
+    def acpx_prepare(self, execution_id: str) -> Dict[str, Any]:
+        execution = self.repo.get_execution(execution_id)
+        if not execution:
+            raise KeyError(f"unknown execution: {execution_id}")
+        return self.acpx.prepare(
+            DispatchRequest(
+                execution_id=execution.execution_id,
+                task_id=execution.task_id,
+                project_id=execution.project_id,
+                attempt_number=execution.attempt_number,
+                contract_ref=execution.execution_contract_ref,
+                correlation_id=execution.idempotency_key,
+            )
+        )
+
+    def prepare_acpx_task(self, task_id: str) -> Dict[str, Any]:
+        """Prepare execution through ACPX sandbox bridge (awaiting authorized dispatch)."""
+        execution = self.prepare_synthetic_execution(task_id)
+        prepared = self.acpx.prepare(
+            DispatchRequest(
+                execution_id=execution.execution_id,
+                task_id=execution.task_id,
+                project_id=execution.project_id,
+                attempt_number=execution.attempt_number,
+                contract_ref=execution.execution_contract_ref,
+                correlation_id=execution.idempotency_key,
+            )
+        )
+        self._emit(
+            aggregate_type="execution",
+            aggregate_id=execution.execution_id,
+            event_type="execution.acpx_prepared",
+            payload={
+                "preparation_id": prepared["preparation"]["preparation_id"],
+                "real_launch_blocked": True,
+                "status": prepared["preparation"]["status"],
+            },
+        )
+        return {
+            "execution": execution.to_dict(),
+            "prepared": prepared,
+            "mode": "READY_FOR_AUTHORIZATION",
+        }
+
+    def run_acpx_fixture_demo(self) -> Dict[str, Any]:
+        """Offline EOS-07 demo: prepare real-shaped path, block live, run mock sandbox+ACP."""
+        # Fixture gateway (authenticated operator.read) + sandbox launcher.
+        gateway = OpenClawGatewayClient(
+            transport=InMemoryGatewayTransport(scenario="success")
+        )
+        gateway.connect()
+        auth = RuntimeAuthorizationVerifier(
+            secret=b"eos07-test-only-secret",
+            issuance_enabled=True,
+        )
+        bridge = AcpxSandboxBridge(
+            self.repo,
+            gateway=gateway,
+            sandbox=PodmanAcpSandboxLauncher(),
+            auth_verifier=auth,
+            sandbox_gate=self.sandbox_gate,
+        )
+        self.gateway = gateway
+        self.acpx = bridge
+
+        project = self.create_project("ACPX Bridge Demo", "local/acpx-demo")
+        goal = self.create_goal(project.project_id, "Prepare sandbox ACP bridge")
+        t1 = self.create_task(goal.goal_id, "ACPX prepared task")
+        t2 = self.create_task(goal.goal_id, "Follow-up after integration", depends_on=[t1.task_id])
+        self.approve_goal(goal.goal_id)
+
+        prepared = self.prepare_acpx_task(t1.task_id)
+        execution_id = prepared["execution"]["execution_id"]
+        prep_record = prepared["prepared"]["preparation"]
+
+        # Real launch must remain blocked.
+        real_attempt = bridge.sandbox.launch(
+            bridge.build_spec_for_execution(
+                execution_id=execution_id,
+                project_id=project.project_id,
+                task_id=t1.task_id,
+                correlation_id=execution_id,
+                idempotency_key=execution_id,
+            ),
+            mode="REAL",
+        )
+        bypass = bridge.reject_sessions_spawn_bypass()
+
+        # Synthetic continuation through mock sandbox + ACP session manager.
+        dispatch = bridge.run_synthetic_prepared(prep_record, acp_scenario="success")
+        if not dispatch.ok:
+            raise RuntimeError(f"synthetic bridge failed: {dispatch.failure_reason}")
+
+        # Advance execution through legal lifecycle to integration checkpoint.
+        execution = self.repo.get_execution(execution_id)
+        assert execution is not None
+        task = self._require_task(t1.task_id)
+        t_version = task.version
+        assert_transition("task", task.lifecycle_state, "RUNNING", TASK_TRANSITIONS)
+        task.lifecycle_state = "RUNNING"
+        task = self.repo.update_task(task, expected_version=t_version)
+
+        version = execution.version
+        assert_transition("execution", execution.status, "DISPATCHED", EXECUTION_TRANSITIONS)
+        execution.status = "DISPATCHED"
+        execution.started_at = utc_now()
+        execution.runner_type = "ACPX_BRIDGE_SYNTHETIC"
+        execution = self.repo.update_execution(execution, expected_version=version)
+
+        version = execution.version
+        assert_transition("execution", execution.status, "RUNNING", EXECUTION_TRANSITIONS)
+        execution.status = "RUNNING"
+        execution = self.repo.update_execution(execution, expected_version=version)
+
+        version = execution.version
+        store_key = self.evidence.store(
+            execution.execution_id, dispatch.evidence, dispatch.details
+        )
+        execution.evidence_refs = list(dispatch.evidence) + [store_key]
+        assert_transition(
+            "execution", execution.status, "AWAITING_INTEGRATION", EXECUTION_TRANSITIONS
+        )
+        execution.status = "AWAITING_INTEGRATION"
+        execution.integration_state = "pr_pending"
+        execution = self.repo.update_execution(execution, expected_version=version)
+        self.repo_integration.simulate_pr(execution.project_id, execution.execution_id)
+        self.repo_integration.complete_ci(execution.execution_id, success=True)
+
+        from engineering_os.application.orchestrator import SequentialOrchestrator
+
+        orch = SequentialOrchestrator(self)
+        self.repo.set_claim(
+            project.project_id,
+            execution_id=execution_id,
+            task_id=t1.task_id,
+            claim_token="acpx-demo",
+        )
+        integrated = orch.complete_integration(execution_id, approve_merge=True)
+
+        return {
+            "mode": "ACPX_FIXTURE_OFFLINE",
+            "project_id": project.project_id,
+            "task1_id": t1.task_id,
+            "task2_id": t2.task_id,
+            "prepared": prepared,
+            "real_launch": real_attempt.to_dict(),
+            "bypass_rejected": bypass,
+            "dispatch": {
+                "ok": dispatch.ok,
+                "status": dispatch.status,
+                "details": dispatch.details,
+            },
+            "integration": {
+                "action": integrated.get("action"),
+                "evidence_class": integrated.get("evidence_class"),
+            },
+            "ready_after": [t.task_id for t in self.list_ready_tasks(project.project_id)],
+            "runtime": self.runtime_status(),
+            "note": "No containers, Gateway WS, ACPX or Cursor processes were started",
         }
 
     # --- helpers ---

@@ -395,6 +395,90 @@ def cmd_orchestration_simulate_acp(args: argparse.Namespace) -> int:
         plane.close()
 
 
+def cmd_runtime(args: argparse.Namespace) -> int:
+    plane = _plane(args.db)
+    try:
+        if args.runtime_cmd == "status":
+            _print(plane.runtime_status())
+            return 0
+        if args.runtime_cmd == "inspect":
+            _print(plane.runtime_inspect())
+            return 0
+        return 2
+    finally:
+        plane.close()
+
+
+def cmd_sandbox(args: argparse.Namespace) -> int:
+    plane = _plane(args.db)
+    try:
+        if args.sandbox_cmd == "readiness":
+            _print(plane.sandbox_readiness())
+            return 0
+        if args.sandbox_cmd == "plan":
+            _print(plane.sandbox_plan(args.execution_id))
+            return 0
+        return 2
+    finally:
+        plane.close()
+
+
+def cmd_acpx(args: argparse.Namespace) -> int:
+    cmd = args.acpx_cmd
+    if cmd == "demo-fixture":
+        import tempfile
+
+        path = Path(args.db) if args.db else default_db_path()
+        if args.temp:
+            path = Path(tempfile.mkdtemp(prefix="eos-acpx-")) / "demo.sqlite3"
+        plane = ControlPlane.open(path)
+        try:
+            result = plane.run_acpx_fixture_demo()
+            project_id = result["project_id"]
+            execution_id = result["prepared"]["execution"]["execution_id"]
+            plane.close()
+            plane2 = ControlPlane.open(path)
+            try:
+                preps = plane2.acpx_sessions(project_id)
+                result["restart"] = {
+                    "preparations": len(preps),
+                    "prep_status": preps[0]["status"] if preps else None,
+                    "ready": [t.task_id for t in plane2.list_ready_tasks(project_id)],
+                    "no_duplicate_active": len(
+                        [
+                            p
+                            for p in preps
+                            if p["status"]
+                            in {"MOCK_RUNNING", "AWAITING_AUTHORIZED_DISPATCH"}
+                        ]
+                    )
+                    == 0,
+                }
+                result["db_path"] = str(path)
+                _print(result)
+                return 0
+            finally:
+                plane2.close()
+        except Exception:
+            plane.close()
+            raise
+
+    plane = _plane(args.db)
+    try:
+        if cmd == "status":
+            _print(plane.acpx_status())
+            return 0
+        if cmd == "sessions":
+            _print(plane.acpx_sessions(args.project_id))
+            return 0
+        if cmd == "prepare":
+            _print(plane.acpx_prepare(args.execution_id))
+            return 0
+        return 2
+    finally:
+        plane.close()
+
+
 def cmd_acp(args: argparse.Namespace) -> int:
     cmd = args.acp_cmd
     if cmd == "demo-fixture":
@@ -766,6 +850,35 @@ def build_parser() -> argparse.ArgumentParser:
     c.set_defaults(func=cmd_acp)
     c = ac.add_parser("reject-live")
     c.set_defaults(func=cmd_acp)
+
+    p = sub.add_parser("runtime", help="Runtime readiness (EOS-07)")
+    rs = p.add_subparsers(dest="runtime_cmd", required=True)
+    c = rs.add_parser("status")
+    c.set_defaults(func=cmd_runtime)
+    c = rs.add_parser("inspect")
+    c.set_defaults(func=cmd_runtime)
+
+    p = sub.add_parser("sandbox", help="Sandbox launcher readiness (EOS-07)")
+    ss = p.add_subparsers(dest="sandbox_cmd", required=True)
+    c = ss.add_parser("readiness")
+    c.set_defaults(func=cmd_sandbox)
+    c = ss.add_parser("plan")
+    c.add_argument("--execution-id", required=True)
+    c.set_defaults(func=cmd_sandbox)
+
+    p = sub.add_parser("acpx", help="ACPX sandbox bridge (EOS-07)")
+    xs = p.add_subparsers(dest="acpx_cmd", required=True)
+    c = xs.add_parser("status")
+    c.set_defaults(func=cmd_acpx)
+    c = xs.add_parser("sessions")
+    c.add_argument("--project-id", default=None)
+    c.set_defaults(func=cmd_acpx)
+    c = xs.add_parser("prepare")
+    c.add_argument("--execution-id", required=True)
+    c.set_defaults(func=cmd_acpx)
+    c = xs.add_parser("demo-fixture")
+    c.add_argument("--temp", action="store_true")
+    c.set_defaults(func=cmd_acpx)
 
     return parser
 
