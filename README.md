@@ -61,6 +61,36 @@ plus legacy `simulated_integration` for the synthetic orchestrator path.
 A simulated merge never counts as an externally verified GitHub merge.
 Live Cursor ACP remains disabled while SANDBOX is not PASS.
 
+### Paperclip + OpenClaw (EOS-05)
+
+```bash
+# Offline fixture demonstration (no network / no live processes)
+python3 scripts/eos.py integrations demo-fixture --temp
+
+# Paperclip (default URL http://127.0.0.1:3100; token never stored)
+export EOS_PAPERCLIP_URL=http://127.0.0.1:3100
+export EOS_PAPERCLIP_TOKEN=...          # optional; Owner runtime only
+export EOS_PAPERCLIP_COMPANY_ID=...
+python3 scripts/eos.py paperclip status --company-id COMPANY_ID
+python3 scripts/eos.py paperclip sync --company-id COMPANY_ID --project-id PROJECT_ID
+python3 scripts/eos.py paperclip agents --company-id COMPANY_ID
+python3 scripts/eos.py paperclip issues --company-id COMPANY_ID
+python3 scripts/eos.py paperclip link-project LOCAL_PROJECT_ID EXTERNAL_PROJECT_ID --company-id COMPANY_ID
+python3 scripts/eos.py paperclip create-issue --company-id COMPANY_ID --title "Draft" --dry-run
+python3 scripts/eos.py paperclip create-issue --company-id COMPANY_ID --title "Draft" --apply
+
+# OpenClaw read-only diagnostics (fixed argv; no shell interpolation)
+python3 scripts/eos.py openclaw status
+python3 scripts/eos.py openclaw refresh
+python3 scripts/eos.py openclaw gateway-check
+
+python3 scripts/eos.py integrations status
+python3 scripts/eos.py orchestration plan --project-id PROJECT_ID
+```
+
+Dashboard Integrations section requires explicit sync/refresh buttons (pages never auto-connect).
+Gateway WebSocket RPC transport remains explicitly unavailable until a later authenticated increment.
+
 ## Candidate architecture (provisional)
 
 The priority candidate chain is:
