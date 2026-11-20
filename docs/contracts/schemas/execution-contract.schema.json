@@ -1,0 +1,250 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:engineering-os:contracts:execution-contract:0.1.0",
+  "title": "ExecutionContract",
+  "description": "Engineering OS-owned contract for a single authorized, bounded execution request. Declared permissions are requests to be enforced by a separate security boundary. This schema does not enable Git write operations by default.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "kind",
+    "contract_version",
+    "execution_id",
+    "project_id",
+    "task_id",
+    "agent_id",
+    "repository",
+    "expected_revision",
+    "scope",
+    "sandbox",
+    "network_policy",
+    "ceilings",
+    "required_outputs",
+    "git_write",
+    "correlation_id"
+  ],
+  "properties": {
+    "kind": {
+      "type": "string",
+      "const": "ExecutionContract"
+    },
+    "contract_version": {
+      "type": "string",
+      "const": "0.1.0"
+    },
+    "execution_id": {
+      "type": "string",
+      "pattern": "^exec-[a-z0-9-]{8,64}$"
+    },
+    "project_id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]{1,63}$"
+    },
+    "task_id": {
+      "type": "string",
+      "pattern": "^[A-Z][A-Z0-9]+-[0-9]{2}$"
+    },
+    "agent_id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]{1,63}$"
+    },
+    "repository": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider", "owner", "name"],
+      "properties": {
+        "provider": {
+          "type": "string",
+          "enum": ["github"]
+        },
+        "owner": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        }
+      }
+    },
+    "expected_revision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ref_type", "value"],
+      "properties": {
+        "ref_type": {
+          "type": "string",
+          "enum": ["branch", "commit", "tag"]
+        },
+        "value": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        }
+      }
+    },
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["allowed_paths", "forbidden_paths", "allowed_actions", "forbidden_actions"],
+      "properties": {
+        "allowed_paths": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          }
+        },
+        "forbidden_paths": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          }
+        },
+        "allowed_actions": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "enum": [
+              "read_files",
+              "modify_files",
+              "run_tests",
+              "produce_report"
+            ]
+          }
+        },
+        "forbidden_actions": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "enum": [
+              "git_write",
+              "network",
+              "secret_access",
+              "host_config_change",
+              "service_control",
+              "cross_project_access",
+              "dependency_install"
+            ]
+          }
+        }
+      }
+    },
+    "sandbox": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "required"],
+      "properties": {
+        "mode": {
+          "type": "string",
+          "const": "external_required"
+        },
+        "required": {
+          "type": "boolean",
+          "const": true
+        }
+      }
+    },
+    "network_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["default"],
+      "properties": {
+        "default": {
+          "type": "string",
+          "const": "deny"
+        },
+        "exceptions": {
+          "type": "array",
+          "description": "Empty by default. Any exception requires separate approval and enforcement support.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["purpose", "approval_id"],
+            "properties": {
+              "purpose": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              },
+              "approval_id": {
+                "type": "string",
+                "pattern": "^appr-[a-z0-9-]{8,64}$"
+              }
+            }
+          }
+        }
+      }
+    },
+    "ceilings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["max_runtime_seconds", "max_cost_units"],
+      "properties": {
+        "max_runtime_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 86400
+        },
+        "max_cost_units": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Abstract cost units only; not a currency commitment."
+        },
+        "cost_unit_label": {
+          "type": "string",
+          "const": "abstract_units"
+        }
+      }
+    },
+    "required_outputs": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "enum": [
+          "command_log",
+          "file_change_summary",
+          "test_results",
+          "risk_report",
+          "human_actions_pending"
+        ]
+      }
+    },
+    "approval_ids": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^appr-[a-z0-9-]{8,64}$"
+      }
+    },
+    "git_write": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled"],
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "const": false,
+          "description": "Git writes remain disabled by default for MVP executions."
+        }
+      }
+    },
+    "correlation_id": {
+      "type": "string",
+      "description": "Correlation or idempotency identifier for replay-safe handling.",
+      "pattern": "^corr-[a-z0-9-]{8,64}$"
+    }
+  }
+}

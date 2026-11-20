@@ -51,10 +51,14 @@ This architecture is **provisional**. It is neither implemented nor validated en
 | [docs/roadmap.md](docs/roadmap.md) | Milestones, dependencies, and gates |
 | [docs/backlog.yaml](docs/backlog.yaml) | Canonical versioned backlog |
 | [docs/architecture/baseline.md](docs/architecture/baseline.md) | Provisional architectural baseline |
+| [docs/contracts/README.md](docs/contracts/README.md) | Canonical contracts (v0.1.0, provisional) |
+| [docs/policies/permission-matrix.md](docs/policies/permission-matrix.md) | Target least-privilege permission matrix |
 | [docs/adr/README.md](docs/adr/README.md) | Proposed decision register |
+| [docs/adr/ADR-011-canonical-contracts.md](docs/adr/ADR-011-canonical-contracts.md) | ADR-011: versioned canonical contracts |
 | [docs/validation/README.md](docs/validation/README.md) | Validation cycle and definition of done |
 | [docs/tasks/M00-00.md](docs/tasks/M00-00.md) | Baseline audit (diagnostic) |
 | [docs/tasks/M00-01.md](docs/tasks/M00-01.md) | Documentary foundation |
+| [docs/tasks/M00-02.md](docs/tasks/M00-02.md) | Versioned canonical contracts |
 
 ## Collaboration model
 

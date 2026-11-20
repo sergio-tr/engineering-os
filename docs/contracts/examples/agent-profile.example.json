@@ -1,0 +1,48 @@
+{
+  "kind": "AgentProfile",
+  "contract_version": "0.1.0",
+  "agent_id": "impl-agent-alpha",
+  "role_id": "implementation_agent",
+  "display_name": "Implementation Agent Alpha (synthetic)",
+  "assigned_project_ids": [
+    "acme-ledger"
+  ],
+  "capabilities": [
+    "read_code",
+    "edit_code",
+    "run_tests",
+    "propose_pr_text",
+    "summarize_evidence",
+    "request_approval"
+  ],
+  "tool_access": {
+    "requested": [
+      "filesystem_within_scope",
+      "test_runner",
+      "git_read"
+    ],
+    "denied": [
+      "git_write",
+      "network",
+      "package_install",
+      "host_config"
+    ]
+  },
+  "model_selection_policy": {
+    "selection_mode": "owner_configured",
+    "requires_owner_approval_for_paid_usage": true,
+    "notes": "No provider-specific model identifiers are declared in this example."
+  },
+  "human_escalation": {
+    "required_for": [
+      "secret_access",
+      "network_enablement",
+      "dependency_install",
+      "git_write",
+      "privilege_escalation",
+      "cross_project_access",
+      "spend_authorization",
+      "merge"
+    ]
+  }
+}

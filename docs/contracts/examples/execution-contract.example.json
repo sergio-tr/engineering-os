@@ -1,0 +1,71 @@
+{
+  "kind": "ExecutionContract",
+  "contract_version": "0.1.0",
+  "execution_id": "exec-demo-0001-acme",
+  "project_id": "acme-ledger",
+  "task_id": "M00-02",
+  "agent_id": "impl-agent-alpha",
+  "repository": {
+    "provider": "github",
+    "owner": "example-org",
+    "name": "acme-ledger"
+  },
+  "expected_revision": {
+    "ref_type": "branch",
+    "value": "main"
+  },
+  "scope": {
+    "allowed_paths": [
+      "src/ledger/",
+      "tests/ledger/",
+      "docs/contracts/"
+    ],
+    "forbidden_paths": [
+      ".env",
+      "secrets/",
+      "../"
+    ],
+    "allowed_actions": [
+      "read_files",
+      "modify_files",
+      "run_tests",
+      "produce_report"
+    ],
+    "forbidden_actions": [
+      "git_write",
+      "network",
+      "secret_access",
+      "host_config_change",
+      "service_control",
+      "cross_project_access",
+      "dependency_install"
+    ]
+  },
+  "sandbox": {
+    "mode": "external_required",
+    "required": true
+  },
+  "network_policy": {
+    "default": "deny",
+    "exceptions": []
+  },
+  "ceilings": {
+    "max_runtime_seconds": 1800,
+    "max_cost_units": 10,
+    "cost_unit_label": "abstract_units"
+  },
+  "required_outputs": [
+    "command_log",
+    "file_change_summary",
+    "test_results",
+    "risk_report",
+    "human_actions_pending"
+  ],
+  "approval_ids": [
+    "appr-demo-0001-exec"
+  ],
+  "git_write": {
+    "enabled": false
+  },
+  "correlation_id": "corr-demo-0001-acme"
+}
