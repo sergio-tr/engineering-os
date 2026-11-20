@@ -11,23 +11,36 @@ flowchart LR
   OpenClawExec[OpenClaw<br/>executive interface]
   OpenClawCoord[OpenClaw<br/>coordination plane]
   ACPX[ACPX<br/>ACP bridge]
+  Supervisor[EOS supervisor / policy]
+  Launcher[External sandbox launcher]
   GitHub[GitHub / CI]
 
   subgraph SandboxBoundary[External sandbox boundary]
     CursorACP[Cursor CLI ACP executor]
+    Workspace[Disposable project workspace]
   end
 
   Owner --> OpenClawExec
   Owner --> Paperclip
   Owner --> GitHub
+  Owner --> Supervisor
 
   Paperclip --> OpenClawCoord
   OpenClawExec --> OpenClawCoord
   OpenClawCoord --> ACPX
+  OpenClawCoord --> Supervisor
+  Supervisor --> Launcher
+  Launcher --> SandboxBoundary
   ACPX --> CursorACP
-  CursorACP --> GitHub
-  OpenClawCoord --> GitHub
+  CursorACP --> Workspace
+  Owner -->|human merge| GitHub
+  OpenClawCoord -.->|no executor credentials| GitHub
 ```
+
+Detailed sandbox threat model and design (documentation only; not runtime-validated):
+
+- [`sandbox-threat-model.md`](sandbox-threat-model.md)
+- [`sandbox-design.md`](sandbox-design.md)
 
 ## Intended responsibilities
 
@@ -38,7 +51,8 @@ flowchart LR
 | OpenClaw (coordination plane) | Orchestration across projects/agents and tools | Hypothesis / PoC pending |
 | ACPX | Bridge between OpenClaw and ACP executors | PoC pending; presence not conclusive in inventory |
 | Cursor CLI ACP | First engineering executor via ACP | CLI help observed; real session pending |
-| External sandbox | Effective isolation per project or run | Blocking requirement; PoC pending |
+| External sandbox | Effective isolation per project or run | Design documented in M03-00; runtime PoC pending |
+| EOS supervisor / launcher | Policy decision and host-side sandbox launch | Design intent only |
 | GitHub / CI | Authority for commits, PRs, checks, and merges | Recommended; EOS wiring pending |
 
 ## Executive interface vs coordination
@@ -77,7 +91,7 @@ Both may live in the same product (e.g. OpenClaw) but must be modeled as distinc
 | Cursor CLI offers an ACP subcommand | Partial capability observed; real session pending |
 | OpenClaw can coordinate ACP executors via ACPX | Hypothesis / PoC pending |
 | Paperclip will cover organization and costs | Hypothesis / evaluation pending |
-| An external sandbox will contain the Cursor ACP harness | Requirement; PoC pending |
+| An external sandbox will contain the Cursor ACP harness | Requirement; design in M03-00; PoC pending |
 | GitHub will be integration authority | Recommended decision; wiring pending |
 
 ## Mandatory sandbox for the Cursor ACP harness
@@ -89,6 +103,9 @@ It is **forbidden** to treat as sufficient isolation:
 - the working directory (`cwd`);
 - rules in `AGENTS.md` or other markdown;
 - task prompts;
-- naming or branch conventions.
+- naming or branch conventions;
+- Cursor CLI `--sandbox` flags alone.
 
-Without the SANDBOX gate at `PASS`, there is no autonomy on real projects.
+Application-level restrictions are **not** equivalent to host-enforced isolation. See the M03-00 design documents for the planned enforcement model.
+
+Without the SANDBOX gate at `PASS`, there is no autonomy on real projects. M03-00 does not move that gate.

@@ -26,7 +26,7 @@ tasks:
   - id: M01-00
     milestone: M01
     title: Cursor CLI ACP discovery
-    status: READY
+    status: PASS
     depends_on:
       - M00-00
     gate: ACP
@@ -85,7 +85,7 @@ tasks:
   - id: M03-00
     milestone: M03
     title: Sandbox design and isolation boundaries
-    status: PLANNED
+    status: READY
     depends_on:
       - M00-02
       - M01-00
