@@ -385,6 +385,83 @@ def cmd_orchestration_plan(args: argparse.Namespace) -> int:
         plane.close()
 
 
+def cmd_orchestration_simulate_acp(args: argparse.Namespace) -> int:
+    plane = _plane(args.db)
+    try:
+        orch = SequentialOrchestrator(plane)
+        _print(orch.simulate_acp(args.project_id))
+        return 0
+    finally:
+        plane.close()
+
+
+def cmd_acp(args: argparse.Namespace) -> int:
+    cmd = args.acp_cmd
+    if cmd == "demo-fixture":
+        import tempfile
+
+        path = Path(args.db) if args.db else default_db_path()
+        if args.temp:
+            path = Path(tempfile.mkdtemp(prefix="eos-acp-")) / "demo.sqlite3"
+        plane = ControlPlane.open(path)
+        try:
+            result = plane.run_acp_fixture_demo()
+            project_id = result["project_id"]
+            execution_id = result["simulated"]["execution"]["execution_id"]
+            plane.close()
+            plane2 = ControlPlane.open(path)
+            try:
+                sessions = plane2.list_acp_sessions(project_id)
+                detail = plane2.get_acp_session_for_execution(execution_id)
+                result["restart"] = {
+                    "sessions": sessions,
+                    "session_status": detail["session"]["status"],
+                    "event_count": len(detail["events"]),
+                    "ready": [t.task_id for t in plane2.list_ready_tasks(project_id)],
+                    "no_duplicate_active": len(
+                        [
+                            s
+                            for s in sessions
+                            if s["status"]
+                            not in {"COMPLETED", "FAILED", "CANCELLED", "TIMED_OUT"}
+                        ]
+                    )
+                    == 0,
+                }
+                result["db_path"] = str(path)
+                _print(result)
+                return 0
+            finally:
+                plane2.close()
+        except Exception:
+            plane.close()
+            raise
+
+    plane = _plane(args.db)
+    try:
+        if cmd == "status":
+            _print(plane.acp_status())
+            return 0
+        if cmd == "capabilities":
+            _print(plane.acp_capabilities())
+            return 0
+        if cmd == "sessions":
+            _print(plane.list_acp_sessions(args.project_id))
+            return 0
+        if cmd == "session":
+            _print(plane.get_acp_session_for_execution(args.execution_id))
+            return 0
+        if cmd == "cancel":
+            _print(plane.cancel_acp_session(args.execution_id, synthetic=True))
+            return 0
+        if cmd == "reject-live":
+            _print(plane.request_live_acp_transport())
+            return 0
+        return 2
+    finally:
+        plane.close()
+
+
 def cmd_github(args: argparse.Namespace) -> int:
     plane = _plane(args.db)
     try:
@@ -664,6 +741,31 @@ def build_parser() -> argparse.ArgumentParser:
     c = ors.add_parser("plan")
     c.add_argument("--project-id", required=True)
     c.set_defaults(func=cmd_orchestration_plan)
+    c = ors.add_parser("simulate-acp")
+    c.add_argument("--project-id", required=True)
+    c.set_defaults(func=cmd_orchestration_simulate_acp)
+
+    p = sub.add_parser("acp", help="ACP/Cursor execution integration (EOS-06)")
+    ac = p.add_subparsers(dest="acp_cmd", required=True)
+    c = ac.add_parser("status")
+    c.set_defaults(func=cmd_acp)
+    c = ac.add_parser("capabilities")
+    c.set_defaults(func=cmd_acp)
+    c = ac.add_parser("sessions")
+    c.add_argument("--project-id", default=None)
+    c.set_defaults(func=cmd_acp)
+    c = ac.add_parser("session")
+    c.add_argument("execution_id")
+    c.set_defaults(func=cmd_acp)
+    c = ac.add_parser("cancel")
+    c.add_argument("execution_id")
+    c.add_argument("--synthetic", action="store_true", default=True)
+    c.set_defaults(func=cmd_acp)
+    c = ac.add_parser("demo-fixture")
+    c.add_argument("--temp", action="store_true")
+    c.set_defaults(func=cmd_acp)
+    c = ac.add_parser("reject-live")
+    c.set_defaults(func=cmd_acp)
 
     return parser
 

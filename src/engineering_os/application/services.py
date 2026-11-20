@@ -50,6 +50,14 @@ from engineering_os.infrastructure.github_client import (
     HttpTransport,
     parse_repository,
 )
+from engineering_os.infrastructure.acp_adapter import AcpExecutionAdapter
+from engineering_os.infrastructure.acp_session import AcpSessionManager
+from engineering_os.infrastructure.acp_transport import (
+    CursorAcpAdapter,
+    DisabledLiveAcpTransport,
+    InMemoryAcpTransport,
+    OpenClawAcpxExecutionTransport,
+)
 from engineering_os.infrastructure.openclaw_adapter import OpenClawCoordinatorAdapter
 from engineering_os.infrastructure.openclaw_client import OpenClawCliClient
 from engineering_os.infrastructure.paperclip_adapter import PaperclipOrganizationAdapter
@@ -92,6 +100,7 @@ class ControlPlane:
         paperclip_token_provider: Optional[Callable[[], Optional[str]]] = None,
         paperclip_company_id: Optional[str] = None,
         openclaw_client: Optional[OpenClawCliClient] = None,
+        acp_scenario: str = "success",
     ) -> None:
         self.repo = repo
         self.synthetic = execution_adapter or SyntheticExecutionAdapter()
@@ -120,6 +129,10 @@ class ControlPlane:
             "EOS_PAPERCLIP_COMPANY_ID"
         )
         self.openclaw = OpenClawCoordinatorAdapter(client=openclaw_client)
+        self._acp_scenario = acp_scenario
+        self.acp = AcpExecutionAdapter(
+            repo, sandbox_gate=sandbox_gate, synthetic_scenario=acp_scenario
+        )
 
     # --- factories ---
     @classmethod
@@ -1440,6 +1453,195 @@ class ControlPlane:
 
         orch = SequentialOrchestrator(self)
         return orch.build_plan(project_id)
+
+    # --- ACP / Cursor (EOS-06) ---
+    def acp_status(self) -> Dict[str, Any]:
+        return {
+            **self.acp.runtime_status(),
+            "sessions": len(self.repo.list_acp_sessions()),
+        }
+
+    def acp_capabilities(self) -> Dict[str, Any]:
+        return {
+            "protocol_version_supported": 1,
+            "methods": [
+                "initialize",
+                "authenticate",
+                "session/new",
+                "session/prompt",
+                "session/cancel",
+                "session/update",
+                "session/request_permission",
+            ],
+            "permission_policy": "deny_by_default",
+            "live_transport": self.acp.select_transport(live=True).availability().to_dict(),
+            "synthetic_transport": InMemoryAcpTransport().availability().to_dict(),
+            "openclaw_acpx": OpenClawAcpxExecutionTransport().availability().to_dict(),
+            "direct_process_bypass": "rejected_without_sandbox_authorization",
+        }
+
+    def list_acp_sessions(self, project_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        return self.repo.list_acp_sessions(project_id=project_id)
+
+    def get_acp_session_for_execution(self, execution_id: str) -> Dict[str, Any]:
+        session = self.repo.get_acp_session_by_execution(execution_id)
+        if not session:
+            raise KeyError(f"unknown acp session for execution: {execution_id}")
+        events = self.repo.list_acp_events(session["session_id"])
+        return {"session": session, "events": events, "mode": "SYNTHETIC"}
+
+    def cancel_acp_session(self, execution_id: str, *, synthetic: bool = True) -> Dict[str, Any]:
+        session = self.repo.get_acp_session_by_execution(execution_id)
+        if not session:
+            raise KeyError(f"unknown acp session for execution: {execution_id}")
+        transport = InMemoryAcpTransport(scenario="success")
+        manager = AcpSessionManager(self.repo, transport, sandbox_gate=self.sandbox_gate)
+        updated = manager.cancel(session, synthetic=synthetic)
+        return updated
+
+    def request_live_acp_transport(self) -> Dict[str, Any]:
+        """Demonstrate live ACP rejection while SANDBOX is unapproved."""
+        # Do not trust caller-supplied gate strings — only self.sandbox_gate.
+        transport = self.acp.select_transport(live=True)
+        avail = transport.availability()
+        try:
+            transport.send({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
+            rejected = False
+            error = None
+        except Exception as exc:  # noqa: BLE001
+            rejected = True
+            error = str(exc)
+        return {
+            "rejected": rejected or not avail.available,
+            "availability": avail.to_dict(),
+            "sandbox_gate": self.sandbox_gate,
+            "error": error,
+            "note": "live ACP cannot start while SANDBOX is NOT_TESTED",
+        }
+
+    def simulate_acp_task(self, task_id: str) -> Dict[str, Any]:
+        """Prepare execution and dispatch through synthetic ACP adapter."""
+        execution = self.prepare_synthetic_execution(task_id)
+        # Use ACP adapter instead of default synthetic executor.
+        task = self._require_task(task_id)
+        version = execution.version
+        from engineering_os.domain.states import EXECUTION_TRANSITIONS, TASK_TRANSITIONS
+
+        assert_transition("execution", execution.status, "DISPATCHED", EXECUTION_TRANSITIONS)
+        execution.status = "DISPATCHED"
+        execution.started_at = utc_now()
+        execution.runner_type = "ACP_SYNTHETIC"
+        execution = self.repo.update_execution(execution, expected_version=version)
+
+        t_version = task.version
+        assert_transition("task", task.lifecycle_state, "RUNNING", TASK_TRANSITIONS)
+        task.lifecycle_state = "RUNNING"
+        task = self.repo.update_task(task, expected_version=t_version)
+
+        version = execution.version
+        assert_transition("execution", execution.status, "RUNNING", EXECUTION_TRANSITIONS)
+        execution.status = "RUNNING"
+        execution = self.repo.update_execution(execution, expected_version=version)
+
+        result = self.acp.dispatch(
+            DispatchRequest(
+                execution_id=execution.execution_id,
+                task_id=execution.task_id,
+                project_id=execution.project_id,
+                attempt_number=execution.attempt_number,
+                contract_ref=execution.execution_contract_ref,
+                correlation_id=execution.idempotency_key,
+            )
+        )
+        version = execution.version
+        if result.ok and result.evidence:
+            store_key = self.evidence.store(
+                execution.execution_id, result.evidence, result.details
+            )
+            execution.evidence_refs = list(result.evidence) + [store_key]
+            assert_transition(
+                "execution", execution.status, "AWAITING_INTEGRATION", EXECUTION_TRANSITIONS
+            )
+            execution.status = "AWAITING_INTEGRATION"
+            execution.integration_state = "pr_pending"
+            execution = self.repo.update_execution(execution, expected_version=version)
+            self.repo_integration.simulate_pr(execution.project_id, execution.execution_id)
+            self.repo_integration.complete_ci(execution.execution_id, success=True)
+            self._emit(
+                aggregate_type="execution",
+                aggregate_id=execution.execution_id,
+                event_type="execution.acp_synthetic_awaiting_integration",
+                payload={
+                    "evidence": execution.evidence_refs,
+                    "acp": result.details,
+                    "note": "synthetic ACP success is not real Cursor execution",
+                },
+            )
+        else:
+            assert_transition("execution", execution.status, "FAILED", EXECUTION_TRANSITIONS)
+            execution.status = "FAILED"
+            execution.failure_reason = result.failure_reason
+            execution.ended_at = utc_now()
+            execution = self.repo.update_execution(execution, expected_version=version)
+            task = self._require_task(task.task_id)
+            t_version = task.version
+            assert_transition("task", task.lifecycle_state, "FAILED", TASK_TRANSITIONS)
+            task.lifecycle_state = "FAILED"
+            self.repo.update_task(task, expected_version=t_version)
+            self._emit(
+                aggregate_type="execution",
+                aggregate_id=execution.execution_id,
+                event_type="execution.acp_synthetic_failed",
+                payload={"reason": result.failure_reason},
+            )
+        session = self.repo.get_acp_session_by_execution(execution.execution_id)
+        return {
+            "execution": execution.to_dict(),
+            "session": session,
+            "dispatch": {
+                "ok": result.ok,
+                "status": result.status,
+                "details": result.details,
+            },
+            "mode": "SYNTHETIC",
+        }
+
+    def run_acp_fixture_demo(self) -> Dict[str, Any]:
+        project = self.create_project("ACP Demo Project", "local/acp-demo")
+        goal = self.create_goal(project.project_id, "Demonstrate synthetic ACP")
+        t1 = self.create_task(goal.goal_id, "ACP synthetic task")
+        t2 = self.create_task(goal.goal_id, "Follow-up task", depends_on=[t1.task_id])
+        self.approve_goal(goal.goal_id)
+        simulated = self.simulate_acp_task(t1.task_id)
+        execution_id = simulated["execution"]["execution_id"]
+        if simulated["execution"]["status"] != "AWAITING_INTEGRATION":
+            raise RuntimeError("expected ACP execution awaiting integration")
+        from engineering_os.application.orchestrator import SequentialOrchestrator
+
+        orch = SequentialOrchestrator(self)
+        # Claim for integration completion path
+        self.repo.set_claim(
+            project.project_id,
+            execution_id=execution_id,
+            task_id=t1.task_id,
+            claim_token="acp-demo",
+        )
+        integrated = orch.complete_integration(execution_id, approve_merge=True)
+        live_reject = self.request_live_acp_transport()
+        return {
+            "mode": "ACP_FIXTURE_OFFLINE",
+            "project_id": project.project_id,
+            "task1_id": t1.task_id,
+            "task2_id": t2.task_id,
+            "simulated": simulated,
+            "integration": {
+                "action": integrated.get("action"),
+                "evidence_class": integrated.get("evidence_class"),
+            },
+            "ready_after": [t.task_id for t in self.list_ready_tasks(project.project_id)],
+            "live_acp_rejected": live_reject,
+            "note": "Synthetic ACP and synthetic merge only; not real Cursor/GitHub",
+        }
 
     def run_eos05_fixture_demo(self) -> Dict[str, Any]:
         if self._paperclip_transport is None:

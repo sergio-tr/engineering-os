@@ -91,6 +91,24 @@ python3 scripts/eos.py orchestration plan --project-id PROJECT_ID
 Dashboard Integrations section requires explicit sync/refresh buttons (pages never auto-connect).
 Gateway WebSocket RPC transport remains explicitly unavailable until a later authenticated increment.
 
+### ACP / Cursor (EOS-06)
+
+```bash
+# Offline synthetic ACP protocol demo (no live Cursor/ACPX)
+python3 scripts/eos.py acp demo-fixture --temp
+
+python3 scripts/eos.py acp status
+python3 scripts/eos.py acp capabilities
+python3 scripts/eos.py acp sessions --project-id PROJECT_ID
+python3 scripts/eos.py acp session EXECUTION_ID
+python3 scripts/eos.py acp reject-live
+python3 scripts/eos.py orchestration simulate-acp --project-id PROJECT_ID
+```
+
+Synthetic ACP sessions use real JSON-RPC message handling and durable SQLite
+persistence. Live OpenClaw→ACPX→Cursor dispatch remains blocked while SANDBOX is
+`NOT_TESTED`. There is no dashboard control that starts live ACP.
+
 ## Candidate architecture (provisional)
 
 The priority candidate chain is:

@@ -89,6 +89,19 @@
     </section>
 
     <section>
+      <h2>ACP runtime <span class="badge SYNTHETIC">SYNTHETIC</span></h2>
+      <p class="meta">OpenClaw→ACPX→Cursor prepared; live dispatch blocked while SANDBOX is NOT_TESTED. No live ACP button.</p>
+      <div class="row" style="margin-bottom:0.75rem">
+        <button type="button" id="btn-acp-status">ACP status</button>
+        <button type="button" id="btn-acp-sessions">List sessions</button>
+        <button type="button" id="btn-acp-demo" class="synth">Run SYNTHETIC ACP demo</button>
+      </div>
+      <div id="acp-runtime-panel" class="panel empty">Load ACP status explicitly</div>
+      <ul id="acp-session-list" class="list"></ul>
+      <div id="acp-timeline" class="panel empty">Select a session for timeline</div>
+    </section>
+
+    <section>
       <h2>Integrations</h2>
       <div class="row" style="margin-bottom:0.75rem">
         <button type="button" id="btn-integrations">Refresh integrations overview</button>

@@ -77,6 +77,25 @@ No live Paperclip, OpenClaw, ACPX, Cursor ACP, or GitHub mutations are started b
 - Evidence classes distinguish `SYNTHETIC` / `simulated_integration` from `LIVE_READ_ONLY`, `CACHED`, `EXTERNALLY_VERIFIED`, `ERROR`
 - Real network sync occurs only when the Owner configures a connection and invokes sync (token via `EOS_GITHUB_TOKEN`)
 
+## ACP / Cursor integration (EOS-06)
+
+Intended path: Engineering OS → SequentialOrchestrator → AcpExecutionAdapter →
+OpenClaw ACP backend → ACPX → Cursor CLI ACP.
+
+Implemented locally:
+
+- JSON-RPC ACP protocol helpers (`acp_protocol`) with request correlation and size bounds
+- Durable `acp_sessions` / `acp_session_events` in SQLite (separate from task lifecycle)
+- `AcpSessionManager` + `AcpExecutionAdapter` with deny-by-default permissions
+- `InMemoryAcpTransport` for synthetic end-to-end protocol simulation
+- `OpenClawAcpxExecutionTransport` and `CursorAcpAdapter` contracts (no live process spawn)
+- `DisabledLiveAcpTransport` rejects live dispatch while SANDBOX ≠ PASS (service + transport)
+- CLI: `eos acp status|capabilities|sessions|session|demo-fixture|cancel`
+- Dashboard ACP runtime / sessions / timeline panels (SYNTHETIC only; no live ACP button)
+
+Synthetic ACP success is not real Cursor execution. Live OpenClaw→ACPX→Cursor dispatch
+remains blocked until an externally enforced sandbox launcher authorizes it.
+
 ## Assumptions
 
 - Python ≥ 3.10 standard library only (no third-party runtime dependencies)
