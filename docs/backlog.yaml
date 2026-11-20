@@ -1,0 +1,229 @@
+schema_version: 1
+tasks:
+  - id: M00-00
+    milestone: M00
+    title: Technical baseline audit of the environment
+    status: PASS
+    depends_on: []
+    gate: BASELINE
+
+  - id: M00-01
+    milestone: M00
+    title: Documentary foundation and repository governance
+    status: READY
+    depends_on:
+      - M00-00
+    gate: DOCUMENTATION
+
+  - id: M00-02
+    milestone: M00
+    title: Versioned canonical contracts
+    status: PLANNED
+    depends_on:
+      - M00-01
+    gate: DOCUMENTATION
+
+  - id: M01-00
+    milestone: M01
+    title: Cursor CLI ACP discovery
+    status: PLANNED
+    depends_on:
+      - M00-00
+    gate: ACP
+
+  - id: M01-01
+    milestone: M01
+    title: Controlled ACP session with evidence
+    status: PLANNED
+    depends_on:
+      - M01-00
+      - M03-02
+    gate: ACP
+
+  - id: M01-02
+    milestone: M01
+    title: ACP gate closed with external evidence
+    status: PLANNED
+    depends_on:
+      - M01-01
+    gate: ACP
+
+  - id: M02-00
+    milestone: M02
+    title: OpenClaw diagnosis and ACP surface
+    status: PLANNED
+    depends_on:
+      - M00-00
+    gate: ACPX
+
+  - id: M02-01
+    milestone: M02
+    title: Authorized OpenClaw fix if required
+    status: PLANNED
+    depends_on:
+      - M02-00
+    gate: ACPX
+
+  - id: M02-02
+    milestone: M02
+    title: ACPX integration validation
+    status: PLANNED
+    depends_on:
+      - M02-00
+      - M01-01
+    gate: ACPX
+
+  - id: M02-03
+    milestone: M02
+    title: ACPX gate closed with external evidence
+    status: PLANNED
+    depends_on:
+      - M02-02
+      - M03-02
+    gate: ACPX
+
+  - id: M03-00
+    milestone: M03
+    title: Sandbox design and isolation boundaries
+    status: PLANNED
+    depends_on:
+      - M00-02
+      - M01-00
+    gate: SANDBOX
+
+  - id: M03-01
+    milestone: M03
+    title: Effective external isolation PoC
+    status: PLANNED
+    depends_on:
+      - M03-00
+    gate: SANDBOX
+
+  - id: M03-02
+    milestone: M03
+    title: SANDBOX gate closed with external evidence
+    status: PLANNED
+    depends_on:
+      - M03-01
+    gate: SANDBOX
+
+  - id: M04-00
+    milestone: M04
+    title: Evaluate Paperclip as organizational layer
+    status: PLANNED
+    depends_on:
+      - M00-02
+    gate: PAPERCLIP
+
+  - id: M04-01
+    milestone: M04
+    title: Minimal operable organization in Paperclip
+    status: PLANNED
+    depends_on:
+      - M04-00
+    gate: PAPERCLIP
+
+  - id: M04-02
+    milestone: M04
+    title: PAPERCLIP gate closed with external evidence
+    status: PLANNED
+    depends_on:
+      - M04-01
+      - M02-03
+    gate: PAPERCLIP
+
+  - id: M05-00
+    milestone: M05
+    title: GitHub and CI integration contract
+    status: PLANNED
+    depends_on:
+      - M00-02
+      - M03-02
+    gate: GITHUB
+
+  - id: M05-01
+    milestone: M05
+    title: PR flow, CI checks, and human approval
+    status: PLANNED
+    depends_on:
+      - M05-00
+      - M01-01
+    gate: GITHUB
+
+  - id: M05-02
+    milestone: M05
+    title: GITHUB gate closed with external evidence
+    status: PLANNED
+    depends_on:
+      - M05-01
+      - M04-02
+    gate: GITHUB
+
+  - id: M06-00
+    milestone: M06
+    title: Operational state persistence and idempotency
+    status: PLANNED
+    depends_on:
+      - M02-03
+      - M04-02
+      - M05-02
+    gate: RECOVERY
+
+  - id: M06-01
+    milestone: M06
+    title: RECOVERY gate closed with external evidence
+    status: PLANNED
+    depends_on:
+      - M06-00
+    gate: RECOVERY
+
+  - id: M06-02
+    milestone: M06
+    title: MULTI_PROJECT gate closed with external evidence
+    status: PLANNED
+    depends_on:
+      - M06-01
+      - M03-02
+    gate: MULTI_PROJECT
+
+  - id: M07-00
+    milestone: M07
+    title: Minimal executive experience
+    status: PLANNED
+    depends_on:
+      - M04-01
+      - M06-01
+    gate: EXECUTIVE_UX
+
+  - id: M07-01
+    milestone: M07
+    title: Usable mobile executive experience
+    status: PLANNED
+    depends_on:
+      - M07-00
+      - M06-02
+    gate: EXECUTIVE_UX
+
+  - id: M08-00
+    milestone: M08
+    title: Security and operations hardening
+    status: PLANNED
+    depends_on:
+      - M07-01
+    gate: HARDENING
+
+  - id: M08-01
+    milestone: M08
+    title: Controlled supervised pilot
+    status: PLANNED
+    depends_on:
+      - M08-00
+    gate: HARDENING
+
+  - id: M08-02
+    milestone: M08
+    title: Continuous operations under human governance
+    status: PLANNED
+    depends_on:
+      - M08-01
+    gate: HARDENING
