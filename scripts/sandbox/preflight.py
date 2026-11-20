@@ -365,8 +365,13 @@ def assess() -> dict[str, Any]:
             "Binary availability or --version is not rootless proof.",
             "Docker context socket paths are not authoritative rootless proof.",
             "Docker-local images do not satisfy Podman image readiness (and vice versa).",
-            "Isolation enforcement remains untested until Phase B negative tests.",
-            "Phase A must not execute containers.",
+            "Only exact local alpine/busybox refs qualify (e.g. alpine:3.20, "
+            "docker.io/library/alpine:3.20). Non-conforming names such as "
+            "localhost/3.20:latest are ignored.",
+            "Phase B1 execute path is Podman-rootless only; Docker is not authorized.",
+            "Argv/launcher flags are not isolation proof; runtime inspect + behavioral "
+            "evidence are required after Owner-authorized execute.",
+            "Isolation enforcement remains NOT_TESTED until Owner-authorized execute.",
         ],
     }
     return report
