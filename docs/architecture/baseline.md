@@ -11,9 +11,11 @@ flowchart LR
   OpenClawExec[OpenClaw<br/>executive interface]
   OpenClawCoord[OpenClaw<br/>coordination plane]
   ACPX[ACPX<br/>ACP bridge]
-  CursorACP[Cursor CLI ACP<br/>executor]
-  Sandbox[External sandbox]
   GitHub[GitHub / CI]
+
+  subgraph SandboxBoundary[External sandbox boundary]
+    CursorACP[Cursor CLI ACP executor]
+  end
 
   Owner --> OpenClawExec
   Owner --> Paperclip
@@ -23,7 +25,6 @@ flowchart LR
   OpenClawExec --> OpenClawCoord
   OpenClawCoord --> ACPX
   ACPX --> CursorACP
-  CursorACP --> Sandbox
   CursorACP --> GitHub
   OpenClawCoord --> GitHub
 ```

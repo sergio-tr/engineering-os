@@ -1,0 +1,39 @@
+{
+  "kind": "ProjectProfile",
+  "contract_version": "0.1.0",
+  "project_id": "acme-ledger",
+  "display_name": "Acme Ledger (synthetic example)",
+  "repository": {
+    "provider": "github",
+    "owner": "example-org",
+    "name": "acme-ledger",
+    "default_branch": "main"
+  },
+  "isolation": {
+    "required": true,
+    "mode": "external_sandbox",
+    "notes": "cwd and prompts are not isolation. External sandbox enforcement is mandatory."
+  },
+  "execution_policy": {
+    "sandbox_enforcement": "required_external",
+    "git_write_default": "deny"
+  },
+  "scope": {
+    "allowed_paths": [
+      "src/",
+      "tests/",
+      "docs/"
+    ],
+    "forbidden_paths": [
+      ".env",
+      "secrets/",
+      "../"
+    ],
+    "cross_project_access": "deny"
+  },
+  "budget_policy": {
+    "tracking_enabled": true,
+    "currency": "USD",
+    "notes": "Placeholder only. No spending amount is authorized by this example."
+  }
+}

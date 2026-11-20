@@ -1,6 +1,6 @@
 # Architecture Decision Records (ADR)
 
-This directory will hold individual ADRs. Individual ADR files are **not** created yet: this README is the initial index of proposals and statuses.
+This directory holds the ADR index and individual decision records as they are authorized. This README remains the status index for proposals and ratified decisions.
 
 ## How to read statuses
 
@@ -29,12 +29,12 @@ This directory will hold individual ADRs. Individual ADR files are **not** creat
 | ADR-008 | Reconciliation via webhook + API | RECOMMENDED |
 | ADR-009 | Avoid a large durable engine initially | PROVISIONAL |
 | ADR-010 | Cursor Cloud as execution alternative | DEFERRED |
-| ADR-011 | Versioned canonical contracts in the repo | RECOMMENDED |
+| ADR-011 | [Versioned canonical contracts in the repo](ADR-011-canonical-contracts.md) | RECOMMENDED |
 | ADR-012 | OPA / Temporal / Kubernetes as early dependencies | DEFERRED |
 
 ## Rules
 
 1. Do not declare `PROVISIONAL` or `REQUIRES_POC` decisions as implemented.
 2. An open `BLOCKING` ADR prevents autonomy on real projects.
-3. Individual ADR files will be added in a later authorized increment (e.g. M00-02 or another explicit scope).
+3. Individual ADR files are added only in authorized increments; ADR-011 is the first detailed record.
 4. Any acceptance or rejection is versioned in Git after human integration.

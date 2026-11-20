@@ -1,0 +1,146 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:engineering-os:contracts:project-profile:0.1.0",
+  "title": "ProjectProfile",
+  "description": "Engineering OS-owned contract describing the identity and authorized boundaries of a managed project. Not a native Paperclip, OpenClaw, ACPX, or Cursor configuration format. A repository path or working directory alone does not provide isolation.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "kind",
+    "contract_version",
+    "project_id",
+    "display_name",
+    "repository",
+    "isolation",
+    "execution_policy",
+    "scope"
+  ],
+  "properties": {
+    "kind": {
+      "type": "string",
+      "const": "ProjectProfile"
+    },
+    "contract_version": {
+      "type": "string",
+      "const": "0.1.0"
+    },
+    "project_id": {
+      "type": "string",
+      "description": "Stable project identifier within Engineering OS.",
+      "pattern": "^[a-z][a-z0-9_-]{1,63}$"
+    },
+    "display_name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "repository": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider", "owner", "name", "default_branch"],
+      "properties": {
+        "provider": {
+          "type": "string",
+          "enum": ["github"]
+        },
+        "owner": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "default_branch": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        }
+      }
+    },
+    "isolation": {
+      "type": "object",
+      "description": "Project isolation is mandatory and must be enforced by an external sandbox, not by cwd or prompts.",
+      "additionalProperties": false,
+      "required": ["required", "mode"],
+      "properties": {
+        "required": {
+          "type": "boolean",
+          "const": true
+        },
+        "mode": {
+          "type": "string",
+          "enum": ["external_sandbox"]
+        },
+        "notes": {
+          "type": "string",
+          "maxLength": 500
+        }
+      }
+    },
+    "execution_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sandbox_enforcement", "git_write_default"],
+      "properties": {
+        "sandbox_enforcement": {
+          "type": "string",
+          "const": "required_external"
+        },
+        "git_write_default": {
+          "type": "string",
+          "const": "deny",
+          "description": "Git write operations are denied by default during the MVP."
+        }
+      }
+    },
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["allowed_paths", "forbidden_paths", "cross_project_access"],
+      "properties": {
+        "allowed_paths": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          }
+        },
+        "forbidden_paths": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          }
+        },
+        "cross_project_access": {
+          "type": "string",
+          "const": "deny"
+        }
+      }
+    },
+    "budget_policy": {
+      "type": "object",
+      "description": "Optional placeholder for future budget tracking. Do not invent spending amounts in v0.1.0.",
+      "additionalProperties": false,
+      "properties": {
+        "tracking_enabled": {
+          "type": "boolean"
+        },
+        "currency": {
+          "type": "string",
+          "enum": ["USD"]
+        },
+        "notes": {
+          "type": "string",
+          "maxLength": 500
+        }
+      }
+    }
+  }
+}
