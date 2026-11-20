@@ -731,6 +731,317 @@ def wall_clock_attributed(result: dict[str, Any]) -> bool:
     return bool(result.get("timed_out")) or result.get("wall_clock_attribution") == "host_timeout"
 
 
+def parse_cpu_max(text: str) -> dict[str, Any]:
+    """Parse cgroup v2 ``cpu.max`` (``QUOTA PERIOD`` or ``max PERIOD``)."""
+    raw = (text or "").strip()
+    if not raw:
+        return {"ok": False, "error": "empty_cpu_max", "unlimited": None}
+    parts = raw.split()
+    if len(parts) != 2:
+        return {"ok": False, "error": "malformed_cpu_max", "raw": raw[:80]}
+    quota_s, period_s = parts[0], parts[1]
+    try:
+        period = int(period_s)
+    except ValueError:
+        return {"ok": False, "error": "invalid_period", "raw": raw[:80]}
+    if period <= 0:
+        return {"ok": False, "error": "non_positive_period", "raw": raw[:80]}
+    if quota_s == "max":
+        return {
+            "ok": True,
+            "unlimited": True,
+            "quota_usec": None,
+            "period_usec": period,
+            "cpus_equiv": None,
+            "raw": raw,
+        }
+    try:
+        quota = int(quota_s)
+    except ValueError:
+        return {"ok": False, "error": "invalid_quota", "raw": raw[:80]}
+    if quota < 0:
+        return {"ok": False, "error": "negative_quota", "raw": raw[:80]}
+    return {
+        "ok": True,
+        "unlimited": False,
+        "quota_usec": quota,
+        "period_usec": period,
+        "cpus_equiv": round(quota / period, 6),
+        "raw": raw,
+    }
+
+
+def parse_cpu_stat(text: str) -> dict[str, Any]:
+    """Parse cgroup v2 ``cpu.stat`` key/value lines into integers."""
+    raw = text or ""
+    if not raw.strip():
+        return {"ok": False, "error": "empty_cpu_stat"}
+    values: dict[str, int] = {}
+    for line in raw.splitlines():
+        parts = line.strip().split()
+        if len(parts) != 2:
+            continue
+        key, val = parts[0], parts[1]
+        try:
+            values[key] = int(val)
+        except ValueError:
+            continue
+    required = ("usage_usec", "nr_periods", "nr_throttled", "throttled_usec")
+    missing = [k for k in required if k not in values]
+    if missing:
+        return {"ok": False, "error": "missing_cpu_stat_keys", "missing": missing, "values": values}
+    return {"ok": True, "values": values}
+
+
+def cpu_quota_matches_configured(
+    cpu_max: dict[str, Any],
+    *,
+    configured_cpus: float,
+    tolerance: float = 0.05,
+) -> bool:
+    """True when effective cpu.max ratio matches the configured ``--cpus`` value."""
+    if not cpu_max.get("ok") or cpu_max.get("unlimited"):
+        return False
+    equiv = cpu_max.get("cpus_equiv")
+    if equiv is None:
+        return False
+    if configured_cpus <= 0:
+        return False
+    return abs(float(equiv) - float(configured_cpus)) <= float(tolerance)
+
+
+def cpu_stat_delta(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
+    """Compute signed deltas for the CPU throttle/usage counters."""
+    if not before.get("ok") or not after.get("ok"):
+        return {"ok": False, "error": "incomplete_cpu_stat_pair"}
+    b = before["values"]
+    a = after["values"]
+    deltas = {
+        key: int(a[key]) - int(b[key])
+        for key in ("usage_usec", "nr_periods", "nr_throttled", "throttled_usec")
+    }
+    return {"ok": True, "deltas": deltas}
+
+
+def cpu_throttling_attributed(delta: dict[str, Any]) -> bool:
+    """True only when throttle counters increase under load (behavioral)."""
+    if not delta.get("ok"):
+        return False
+    deltas = delta.get("deltas") or {}
+    return int(deltas.get("nr_throttled") or 0) > 0 or int(deltas.get("throttled_usec") or 0) > 0
+
+
+def cpu_limit_attributed(result: dict[str, Any]) -> bool:
+    """True only with container-scoped quota + observed throttling evidence."""
+    if result.get("cpu_attribution") == "quota_and_throttle":
+        return True
+    if result.get("cpu_attributed") is True:
+        return True
+    return False
+
+
+def parse_proc_status_capabilities(text: str) -> dict[str, Any]:
+    """Parse Cap* / NoNewPrivs / Seccomp fields from ``/proc/self/status`` text."""
+    raw = text or ""
+    fields = ("CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb", "NoNewPrivs", "Seccomp")
+    found: dict[str, str] = {}
+    for line in raw.splitlines():
+        if ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        key = key.strip()
+        if key in fields:
+            found[key] = value.strip()
+    missing = [k for k in fields if k not in found]
+    if missing:
+        return {"ok": False, "error": "missing_status_fields", "missing": missing, "fields": found}
+    return {"ok": True, "fields": found}
+
+
+def _cap_hex_is_zero(value: str) -> bool:
+    token = (value or "").strip().lower()
+    if not token:
+        return False
+    if token.startswith("0x"):
+        token = token[2:]
+    try:
+        return int(token, 16) == 0
+    except ValueError:
+        return False
+
+
+def capability_drop_all_attributed(caps: dict[str, Any]) -> dict[str, Any]:
+    """Evaluate ``--cap-drop=ALL`` using process capability sets (not argv)."""
+    if not caps.get("ok"):
+        return {
+            "status": "NOT_TESTED",
+            "reason": caps.get("error") or "capability_fields_unavailable",
+            "attributed": False,
+        }
+    fields = caps.get("fields") or {}
+    nonzero = [
+        name
+        for name in ("CapPrm", "CapEff", "CapBnd", "CapAmb")
+        if not _cap_hex_is_zero(str(fields.get(name) or ""))
+    ]
+    no_new = str(fields.get("NoNewPrivs") or "")
+    if nonzero:
+        return {
+            "status": "FAIL",
+            "reason": f"unexpected nonzero capability sets: {nonzero}",
+            "attributed": False,
+            "fields": fields,
+        }
+    if no_new != "1":
+        return {
+            "status": "FAIL",
+            "reason": f"NoNewPrivs expected 1, got {no_new!r}",
+            "attributed": False,
+            "fields": fields,
+        }
+    return {
+        "status": "PASS",
+        "reason": "CapPrm/CapEff/CapBnd/CapAmb zero with NoNewPrivs=1",
+        "attributed": True,
+        "fields": fields,
+    }
+
+
+def parse_id_map(text: str) -> dict[str, Any]:
+    """Parse ``uid_map`` / ``gid_map`` lines: ``container_id host_id length``."""
+    raw = text or ""
+    rows: list[dict[str, int]] = []
+    for line in raw.splitlines():
+        parts = line.strip().split()
+        if len(parts) != 3:
+            continue
+        try:
+            rows.append(
+                {
+                    "container_id": int(parts[0]),
+                    "host_id": int(parts[1]),
+                    "length": int(parts[2]),
+                }
+            )
+        except ValueError:
+            return {"ok": False, "error": "malformed_id_map_line", "raw": line[:80]}
+    if not rows:
+        return {"ok": False, "error": "empty_id_map"}
+    return {"ok": True, "rows": rows}
+
+
+def id_maps_cover_identity(
+    uid_map: dict[str, Any],
+    gid_map: dict[str, Any],
+    *,
+    container_uid: int,
+    container_gid: int,
+    host_uid: int,
+    host_gid: int,
+) -> dict[str, Any]:
+    """Check that maps translate the effective container IDs to the host identity."""
+
+    def covers(mapping: dict[str, Any], container_id: int, host_id: int) -> bool:
+        if not mapping.get("ok"):
+            return False
+        for row in mapping.get("rows") or []:
+            start = int(row["container_id"])
+            length = int(row["length"])
+            host_start = int(row["host_id"])
+            if start <= container_id < start + length:
+                return host_start + (container_id - start) == host_id
+        return False
+
+    if not uid_map.get("ok") or not gid_map.get("ok"):
+        return {
+            "status": "NOT_TESTED",
+            "reason": "uid_map_or_gid_map_unavailable",
+            "attributed": False,
+        }
+    uid_ok = covers(uid_map, container_uid, host_uid)
+    gid_ok = covers(gid_map, container_gid, host_gid)
+    if not uid_ok or not gid_ok:
+        return {
+            "status": "FAIL",
+            "reason": "id_map_does_not_match_host_identity",
+            "attributed": False,
+            "uid_ok": uid_ok,
+            "gid_ok": gid_ok,
+        }
+    return {
+        "status": "PASS",
+        "reason": "uid_map_and_gid_map_cover_host_identity",
+        "attributed": True,
+        "uid_ok": True,
+        "gid_ok": True,
+    }
+
+
+def userns_keep_id_attributed(evidence: dict[str, Any]) -> dict[str, Any]:
+    """Evaluate keep-id consistency from runtime observations (not inspect booleans)."""
+    required = (
+        "container_uid",
+        "container_gid",
+        "host_uid",
+        "host_gid",
+        "uid_map",
+        "gid_map",
+        "workspace_owner_uid",
+        "marker_owner_uid",
+    )
+    missing = [k for k in required if evidence.get(k) is None]
+    if missing:
+        return {
+            "status": "NOT_TESTED",
+            "reason": f"missing_userns_fields:{missing}",
+            "attributed": False,
+        }
+    try:
+        container_uid = int(evidence["container_uid"])
+        container_gid = int(evidence["container_gid"])
+        host_uid = int(evidence["host_uid"])
+        host_gid = int(evidence["host_gid"])
+        workspace_owner = int(evidence["workspace_owner_uid"])
+        marker_owner = int(evidence["marker_owner_uid"])
+    except (TypeError, ValueError):
+        return {
+            "status": "NOT_TESTED",
+            "reason": "non_integer_identity_fields",
+            "attributed": False,
+        }
+
+    # keep-id policy: process identity equals host identity inside the container.
+    if container_uid != host_uid or container_gid != host_gid:
+        return {
+            "status": "FAIL",
+            "reason": "container_euid_egid_do_not_match_host_identity",
+            "attributed": False,
+        }
+    if workspace_owner != host_uid or marker_owner != host_uid:
+        return {
+            "status": "FAIL",
+            "reason": "workspace_or_marker_owner_mismatch",
+            "attributed": False,
+        }
+
+    map_verdict = id_maps_cover_identity(
+        evidence.get("uid_map") or {},
+        evidence.get("gid_map") or {},
+        container_uid=container_uid,
+        container_gid=container_gid,
+        host_uid=host_uid,
+        host_gid=host_gid,
+    )
+    if map_verdict.get("status") != "PASS":
+        return map_verdict
+    return {
+        "status": "PASS",
+        "reason": "keep_id_identity_and_maps_consistent",
+        "attributed": True,
+        "map_verdict": map_verdict,
+    }
+
+
 def evaluate_negative_result(spec: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
     """Evaluate results using separated evidence layers."""
     test_id = spec["id"]
@@ -932,6 +1243,19 @@ def evaluate_negative_result(spec: dict[str, Any], result: dict[str, Any]) -> di
                     "id": test_id,
                     "status": "FAIL",
                     "reason": "wall_clock dimension lacks host-timeout attribution",
+                }
+        if "cpu" in required_dims:
+            if dimensions.get("cpu") is not True:
+                return {
+                    "id": test_id,
+                    "status": "FAIL",
+                    "reason": "cpu dimension lacks attributable quota+throttle evidence",
+                }
+            if not cpu_limit_attributed(result) and not result.get("cpu_attributed"):
+                return {
+                    "id": test_id,
+                    "status": "FAIL",
+                    "reason": "cpu dimension lacks attributable quota+throttle evidence",
                 }
 
     if test_id == "P7":
@@ -1195,6 +1519,150 @@ def self_check() -> None:
         )
         if p6["status"] != "FAIL":
             raise AssertionError("unattributed memory must FAIL P6")
+
+        # --- B2: CPU / capability / userns unit checks (mocked; no containers) ---
+        cpu_max_ok = parse_cpu_max("50000 100000")
+        assert cpu_max_ok["ok"] is True
+        assert cpu_max_ok["unlimited"] is False
+        assert abs(cpu_max_ok["cpus_equiv"] - 0.5) < 1e-9
+        assert cpu_quota_matches_configured(cpu_max_ok, configured_cpus=0.50)
+        assert not cpu_quota_matches_configured(cpu_max_ok, configured_cpus=1.0)
+
+        cpu_max_unlimited = parse_cpu_max("max 100000")
+        assert cpu_max_unlimited["ok"] is True and cpu_max_unlimited["unlimited"] is True
+        assert not cpu_quota_matches_configured(cpu_max_unlimited, configured_cpus=0.50)
+        assert parse_cpu_max("")["ok"] is False
+        assert parse_cpu_max("not-a-quota")["ok"] is False
+
+        stat_before = parse_cpu_stat(
+            "usage_usec 1000\nnr_periods 10\nnr_throttled 1\nthrottled_usec 100\n"
+        )
+        stat_after = parse_cpu_stat(
+            "usage_usec 5000\nnr_periods 40\nnr_throttled 5\nthrottled_usec 900\n"
+        )
+        assert stat_before["ok"] and stat_after["ok"]
+        delta_pos = cpu_stat_delta(stat_before, stat_after)
+        assert delta_pos["ok"] and cpu_throttling_attributed(delta_pos)
+        assert delta_pos["deltas"]["usage_usec"] == 4000
+
+        stat_flat = parse_cpu_stat(
+            "usage_usec 2000\nnr_periods 20\nnr_throttled 1\nthrottled_usec 100\n"
+        )
+        delta_neg = cpu_stat_delta(stat_before, stat_flat)
+        assert delta_neg["ok"] and not cpu_throttling_attributed(delta_neg)
+        assert parse_cpu_stat("usage_usec 1\n")["ok"] is False
+        assert cpu_stat_delta({"ok": False}, stat_after)["ok"] is False
+
+        # Planned cpu_limit flag alone must not attribute enforcement.
+        assert not cpu_limit_attributed({"planned_controls": {"cpu_limit": True}})
+        assert cpu_limit_attributed({"cpu_attribution": "quota_and_throttle"})
+
+        p6_cpu_missing = evaluate_negative_result(
+            {
+                "id": "P6",
+                "required_controls": ["memory_limit", "pids_limit", "cpu_limit"],
+                "expect": {
+                    "required_limit_dimensions": ["memory", "pids", "wall_clock", "cpu"]
+                },
+            },
+            {
+                "exit_code": 124,
+                "stdout": "",
+                "stderr": "",
+                "runtime_inspected_controls": {
+                    "memory_limit": True,
+                    "pids_limit": True,
+                    "cpu_limit": True,
+                },
+                "control_evidence_source": "runtime_inspected_and_behavioral",
+                "controls_provenance": "runtime_inspect",
+                "limit_dimensions": {
+                    "memory": True,
+                    "pids": True,
+                    "wall_clock": True,
+                    "cpu": "NOT_TESTED",
+                },
+                "memory_attributed": True,
+                "pids_attributed": True,
+                "wall_clock_attributed": True,
+                "cpu_attributed": False,
+            },
+        )
+        if p6_cpu_missing["status"] != "FAIL":
+            raise AssertionError("P6 with cpu NOT_TESTED must FAIL when cpu is required")
+
+        caps_zero = parse_proc_status_capabilities(
+            "CapInh:\t0000000000000000\n"
+            "CapPrm:\t0000000000000000\n"
+            "CapEff:\t0000000000000000\n"
+            "CapBnd:\t0000000000000000\n"
+            "CapAmb:\t0000000000000000\n"
+            "NoNewPrivs:\t1\n"
+            "Seccomp:\t2\n"
+        )
+        assert caps_zero["ok"] is True
+        cap_pass = capability_drop_all_attributed(caps_zero)
+        assert cap_pass["status"] == "PASS" and cap_pass["attributed"] is True
+
+        caps_nonzero = parse_proc_status_capabilities(
+            "CapInh:\t0000000000000000\n"
+            "CapPrm:\t00000000a80425fb\n"
+            "CapEff:\t00000000a80425fb\n"
+            "CapBnd:\t00000000a80425fb\n"
+            "CapAmb:\t0000000000000000\n"
+            "NoNewPrivs:\t1\n"
+            "Seccomp:\t2\n"
+        )
+        cap_fail = capability_drop_all_attributed(caps_nonzero)
+        assert cap_fail["status"] == "FAIL"
+
+        caps_missing = parse_proc_status_capabilities("NoNewPrivs:\t1\n")
+        assert caps_missing["ok"] is False
+        assert capability_drop_all_attributed(caps_missing)["status"] == "NOT_TESTED"
+
+        uid_map = parse_id_map("0 100000 1000\n1000 1000 1\n1001 101001 64535\n")
+        gid_map = parse_id_map("0 100000 1000\n1001 1001 1\n1002 101002 64534\n")
+        assert uid_map["ok"] and gid_map["ok"]
+        userns_ok = userns_keep_id_attributed(
+            {
+                "container_uid": 1000,
+                "container_gid": 1001,
+                "host_uid": 1000,
+                "host_gid": 1001,
+                "uid_map": uid_map,
+                "gid_map": gid_map,
+                "workspace_owner_uid": 1000,
+                "marker_owner_uid": 1000,
+            }
+        )
+        assert userns_ok["status"] == "PASS"
+
+        userns_bad_uid = userns_keep_id_attributed(
+            {
+                "container_uid": 0,
+                "container_gid": 1001,
+                "host_uid": 1000,
+                "host_gid": 1001,
+                "uid_map": uid_map,
+                "gid_map": gid_map,
+                "workspace_owner_uid": 1000,
+                "marker_owner_uid": 1000,
+            }
+        )
+        assert userns_bad_uid["status"] == "FAIL"
+
+        userns_missing = userns_keep_id_attributed({"container_uid": 1000})
+        assert userns_missing["status"] == "NOT_TESTED"
+
+        assert parse_id_map("")["ok"] is False
+        assert id_maps_cover_identity(
+            {"ok": False},
+            gid_map,
+            container_uid=1000,
+            container_gid=1001,
+            host_uid=1000,
+            host_gid=1001,
+        )["status"] == "NOT_TESTED"
 
         # Fixture safety
         good = Path(tempfile.mkdtemp(prefix="eos-sandbox-poc-"))

@@ -1,11 +1,12 @@
-# M03-01 validation — External sandbox PoC (Phase B1 evidence hardening)
+# M03-01 validation — External sandbox PoC (Phase B2 evidence closure)
 
 **Explicit statements:**
 
-- No OCI container was executed in this corrective pass.
+- No OCI container was executed in this B2 implementation pass.
 - No image was pulled.
 - No live Cursor ACP session occurred.
-- P1–P8 runtime isolation results are **NOT_TESTED**.
+- Historical Owner evidence for P1–P5, P7 and P8 is retained outside this repository path and is **not** rewritten here.
+- P6 CPU, `cap_drop_all` process sets, and `userns_keep_id` mapping remain **NOT_TESTED** until Owner-authorized B2 execute.
 - SANDBOX gate remains **NOT_TESTED**.
 - M03-01 remains **PLANNED**.
 
@@ -16,7 +17,7 @@
 | 1. Launcher config | `planned_controls` | No (intent only) |
 | 2. Executed argv | `launcher_argv_controls`, argv safety scan | No (configuration only) |
 | 3. Runtime inspect | `runtime_inspected_controls` via `podman inspect` | Partial (config observed) |
-| 4. Behavioral | probes, canaries, OOM/fork/timeout attribution | Required for PASS |
+| 4. Behavioral | probes, canaries, OOM/fork/timeout/CPU throttle, Cap*, uid_map | Required for PASS |
 
 `control_evidence_source` must be `runtime_inspected` or `runtime_inspected_and_behavioral`.
 Provenance `argv_scan_only` / `launcher_argv` fails closed.
@@ -30,67 +31,74 @@ Provenance `argv_scan_only` / `launcher_argv` fails closed.
 | P3 | Same path model + no beta marker content + canary unchanged |
 | P4 | Same path model + no secret marker content + canary unchanged |
 | P5 | `IP_PROBE_STATUS=executed_denied` and `DNS_PROBE_STATUS=executed_denied`; unavailable fails; NETNS + NetworkMode=none |
-| P6 | Attributable memory (OOM/cgroup), PIDs (fork denied), wall-clock (host timeout + cleanup); CPU `NOT_TESTED` unless separately proven; no PASS with missing mandatory dimension |
+| P6 | Attributable memory (OOM/cgroup), PIDs (fork denied), wall-clock (host timeout + cleanup), **and** CPU (`cpu.max` matches `--cpus=0.50` + throttle delta on container cgroup); missing CPU → FAIL when required |
 | P7 | Reliable absence after success (`--rm`) and abnormal stop; inspect errors ≠ absence; distinguish auto vs forced cleanup |
 | P8 | `SOCKET_VISIBLE=0` + inspect confirms no socket binds |
 
-## Corrections applied (R1–R6)
+## B2 security evidence schemas
 
-| ID | Correction |
-|----|------------|
-| R1 | Separated evidence layers; argv no longer labeled runtime-observed |
-| R2 | Removed hard-coded path kinds; container probes emit classification |
-| R3 | Probe status enum; missing tools cannot count as denial |
-| R4 | Attribution gates for memory/PIDs/wall-clock; CPU NOT_TESTED by default |
-| R5 | Named containers, inspect-aware presence, forced cleanup, timeout reaping |
-| R6 | Safety constraints preserved; fail-closed not weakened |
+### CPU (`cpu_evidence`)
 
-## Runtime blocker fix (socket-probe false positive)
+| Field | Meaning |
+|-------|---------|
+| `configured_cpus` | Expected quota (0.50) |
+| `cpu_max` | Parsed container `cpu.max` (quota/period/cpus_equiv) |
+| `cpu_stat_before` / `cpu_stat_after` | Parsed `cpu.stat` samples |
+| `cpu_stat_delta` | Deltas for usage/periods/throttled counters |
+| `cgroup.path` | Resolved container cgroup directory |
+| `container_id` | Linked container identity |
+| `attribution` | `quota_and_throttle` or non-PASS reason |
 
-| Field | Value |
-|-------|--------|
-| Owner attempt | P1 only, triple Owner gate |
-| Result | **BLOCKED** before execution (exit 2) |
-| Error | `FAIL_CLOSED: refusing forbidden command element: docker.sock` |
-| Container started | **no** |
-| Root cause | Full-argv string scan treated P8 workload socket path literals as forbidden launcher config; eager full-catalog construction made `--tests P1` fail while building P8 |
-| Fix | Split launcher opts / mounts from workload; reject socket **mounts** only; construct only selected allow-listed tests |
-| P1 status after fix | Still **NOT_TESTED** (prior attempt BLOCKED; no PASS claimed) |
-| SANDBOX | **NOT_TESTED** |
+Acceptance: quota matches configured CPUs (tolerance 0.05) **and** `nr_throttled` or `throttled_usec` increases. Empty/missing cgroup → `NOT_TESTED`.
 
-## Current host readiness
+### Capabilities (`capability_evidence`)
 
-| Capability | Observation |
-|------------|-------------|
-| Podman rootless | Verified |
-| Exact local alpine/busybox in Podman store | Not ready (`localhost/3.20:latest` rejected) |
-| Block reason | `podman_rootless_but_no_local_image` |
+| Field | Meaning |
+|-------|---------|
+| `parsed.fields` | CapInh/Prm/Eff/Bnd/Amb, NoNewPrivs, Seccomp |
+| `verdict.status` | PASS / FAIL / NOT_TESTED |
+| `verdict.reason` | Attribution note |
 
-## Static validation
+Acceptance: CapPrm, CapEff, CapBnd, CapAmb all zero; NoNewPrivs=1. Argv `--cap-drop ALL` alone is not proof.
+
+### User namespace (`userns_evidence`)
+
+| Field | Meaning |
+|-------|---------|
+| `container_uid` / `container_gid` | Effective IDs inside container |
+| `host_uid` / `host_gid` | Launching host identity |
+| `uid_map` / `gid_map` | Parsed `/proc/self/{uid,gid}_map` |
+| `workspace_owner_uid` / `marker_owner_uid` | Host-side ownership checks |
+| `verdict.status` | PASS / FAIL / NOT_TESTED |
+
+Acceptance: euid/egid match host; maps cover that identity; workspace marker owned by host UID. Inspect `userns_keep_id` boolean alone is insufficient.
+
+Top-level execute summary also exposes `security_controls.cap_drop_all` and `security_controls.userns_keep_id`.
+
+## Static validation (this pass)
 
 | Check | Result |
 |-------|--------|
-| AST/syntax | Executed |
-| assertions self-check | Executed |
-| preflight / dry-run | Executed (no containers) |
-| Partial Owner gate refusal | Executed |
-| Contract validation | Executed |
+| AST/syntax | To be executed in B2 validation |
+| assertions self-check (incl. mocked CPU/caps/userns) | To be executed |
+| P6 dry-run | To be executed (no containers) |
+| Contract validation | To be executed |
 | Container launch | **Not performed** |
 
-## Owner-only execute (later)
+## Owner-only execute (later; B2 closure)
 
 ```bash
 python3 -B scripts/sandbox/run_poc.py \
   --execute --allow-phase-b --owner-authorize-runtime-execution \
-  --tests P1,P2,P3,P4,P5,P6,P7,P8 --json
+  --tests P6 --json
 ```
 
-Requires an exact local alpine/busybox ref in the Podman store first.
+Archive new `p6.json` separately from historical partial P6 evidence. Do not rewrite prior PASS files for P1–P5/P7/P8.
 
 ## Remaining limitations
 
-1. No acceptable Podman-local alpine/busybox image on the current host.
-2. CPU quota not attributed in default P6 (explicit `NOT_TESTED`).
-3. `userns=keep-id` may not always appear in inspect; not required for P1 PASS.
-4. Alpine image toolset may lack DNS utilities → P5 correctly FAILs as unavailable until tooling exists.
-5. Runtime execution remains unauthorized for agents in this pass.
+1. Historical Owner P6 evidence remains CPU-incomplete until a new authorized P6 execute.
+2. `userns_keep_id` / `cap_drop_all` may still appear `false` in `podman inspect`; B2 relies on process/cgroup behavioral evidence instead.
+3. CPU attribution requires a readable container-scoped cgroup; ancestor counters are rejected.
+4. Runtime execution remains unauthorized for agents in this pass.
+5. M03-02 independent audit is still required before SANDBOX PASS.
