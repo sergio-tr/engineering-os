@@ -1,4 +1,4 @@
-# Sandbox PoC harness (M03-01 Phase B2)
+# Sandbox PoC harness (M03-01 Phase B3)
 
 Synthetic, fail-closed isolation harness for Engineering OS.
 
@@ -6,14 +6,12 @@ Synthetic, fail-closed isolation harness for Engineering OS.
 
 1. **Launcher configuration** — planned flags (intent).
 2. **Executed argv** — safety-scanned subprocess arguments (**not** enforcement proof).
-3. **Runtime inspect** — read-only `podman inspect` of the started container.
-4. **Behavioral evidence** — probe markers, canaries, attributable limit/cleanup/CPU/capability/userns signals.
+3. **Runtime inspect** — read-only `podman inspect`.
+4. **Behavioral evidence** — probes, canaries, cgroup CPU samples, host-side `/proc/<pid>` maps, Cap*, cleanup.
 
 Do not treat argv scans as independently observed runtime enforcement.
 
-Argv safety inspection covers **launcher options and mount sources only**. Socket path
-literals inside the fixed P8 workload script are allowed; mounting Docker/Podman
-sockets remains forbidden. Selecting `--tests P1` builds only P1.
+In-container `/proc/self/uid_map` second-column values are **reader-relative**, not unconditional host UIDs. B3 keep-id attribution uses host-side map reads against the live container PID.
 
 ## Scope and safety
 
@@ -23,7 +21,7 @@ sockets remains forbidden. Selecting `--tests P1` builds only P1.
 - No privileged mode, no runtime socket mounts, network `none`
 - `--userns=keep-id` + `--user <host_uid>:<host_gid>`
 - Triple Owner gate required to launch containers
-- Fixed P1–P8 catalog only
+- Fixed P1–P8 catalog; optional `--security-identity-only` probe
 
 ## Commands
 
@@ -32,30 +30,30 @@ Safe dry-run / unit checks:
 ```bash
 python3 -B scripts/sandbox/assertions.py
 python3 -B scripts/sandbox/preflight.py
+python3 -B scripts/sandbox/run_poc.py --security-identity-only --json
 python3 -B scripts/sandbox/run_poc.py --tests P6 --json
 ```
 
-Owner-only execute (later; launches containers):
+Owner-only B3 identity execute (later; launches one synthetic container):
 
 ```bash
 python3 -B scripts/sandbox/run_poc.py \
   --execute \
   --allow-phase-b \
   --owner-authorize-runtime-execution \
-  --tests P6 \
+  --security-identity-only \
   --json
 ```
 
-Recommended Owner B2 closure run is **P6 only** (CPU + capability + userns probes). Prior P1–P5/P7/P8 PASS evidence should be retained separately.
+This mode does **not** mark P6 as executed and does not rerun resource stress probes.
 
 ## Assertion highlights
 
-- P2–P4: container emits `CONTAINER_PATH_KIND=...`; host canary hashes; generic failures without probe markers cannot PASS
-- P5: IP/DNS must be `executed_denied`; `unavailable` fails
-- P6: attributable memory/PIDs/wall-clock **and** CPU (`cpu.max` + throttle delta on the container cgroup); missing CPU cannot PASS
-- P6 also collects `capability_evidence` and `userns_evidence` (process Cap* sets and uid/gid maps)
-- P7: presence checks; inspect errors are not absence; auto vs forced cleanup recorded
+- P6: memory/PIDs/wall-clock/CPU with attributable evidence
+- Capabilities: CapPrm/Eff/Bnd/Amb zero + NoNewPrivs=1 from process status
+- Userns keep-id: host-side maps + UID/GID ownership; in-container maps alone cannot PASS
+- P7: presence checks; inspect errors are not absence
 
 ## Status
 
-M03-01 remains **PLANNED**. SANDBOX remains **NOT_TESTED** until Owner-authorized B2 evidence is reviewed and M03-02 audit completes.
+M03-01 remains **PLANNED**. SANDBOX remains **NOT_TESTED** until Owner-authorized B3 evidence is reviewed and M03-02 audit completes.

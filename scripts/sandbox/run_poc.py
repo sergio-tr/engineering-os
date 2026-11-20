@@ -405,24 +405,22 @@ def _inner_p6_cpu() -> str:
 
 
 def _inner_security_identity() -> str:
-    """Emit capability and userns markers; write a workspace ownership marker."""
+    """Write ownership marker, emit euid/egid, then hold for host-side sampling.
+
+    In-container uid_map/gid_map text is emitted only as diagnostic context; B3
+    attribution uses host-side ``/proc/<pid>/*_map`` reads instead.
+    """
     return (
         "echo PROBE_MARKER=SECURITY_IDENTITY; "
         "echo CONTAINER_UID=$(id -u); "
         "echo CONTAINER_GID=$(id -g); "
-        "echo USERNS_INODE=$(ls -id /proc/self/ns/user 2>/dev/null | awk '{print $1}'); "
-        "echo '---UID_MAP---'; "
-        "cat /proc/self/uid_map 2>/dev/null || echo UID_MAP_UNAVAILABLE=1; "
-        "echo '---GID_MAP---'; "
-        "cat /proc/self/gid_map 2>/dev/null || echo GID_MAP_UNAVAILABLE=1; "
-        "echo '---STATUS_CAPS---'; "
-        "sed -n "
-        "'/^CapInh:/p;/^CapPrm:/p;/^CapEff:/p;/^CapBnd:/p;/^CapAmb:/p;"
-        "/^NoNewPrivs:/p;/^Seccomp:/p' /proc/self/status 2>/dev/null "
-        "|| echo STATUS_CAPS_UNAVAILABLE=1; "
-        "echo '---END_STATUS_CAPS---'; "
         "echo marker > /workspace/security-identity-marker.txt; "
         "test -s /workspace/security-identity-marker.txt; "
+        "echo MARKER_WRITTEN=1; "
+        "echo READY_FOR_HOST_SAMPLE=1; "
+        # Bounded hold so the launcher can read host-side procfs maps.
+        "sleep 12; "
+        "echo HOLD_COMPLETE=1; "
         "exit 0"
     )
 
@@ -1224,6 +1222,157 @@ def _parse_marker_block(stdout: str, start: str, end: str) -> str:
     return match.group(1).strip() if match else ""
 
 
+def _read_proc_file(path: Path) -> dict[str, Any]:
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except FileNotFoundError:
+        return {"ok": False, "error": "proc_file_missing", "path": str(path)}
+    except PermissionError:
+        return {"ok": False, "error": "proc_file_permission_denied", "path": str(path)}
+    except OSError as exc:
+        return {"ok": False, "error": type(exc).__name__, "path": str(path)}
+    return {"ok": True, "text": text, "path": str(path)}
+
+
+def _proc_starttime(pid: int) -> dict[str, Any]:
+    """Read field 22 (starttime) from ``/proc/<pid>/stat`` for PID-reuse guards."""
+    raw = _read_proc_file(Path(f"/proc/{pid}/stat"))
+    if not raw.get("ok"):
+        return raw
+    text = raw["text"]
+    # Comm may contain spaces/parentheses; split after the closing ')'.
+    try:
+        rparen = text.rfind(")")
+        fields = text[rparen + 2 :].split()
+        starttime = int(fields[19])  # starttime is the 22nd overall field → index 19 after state
+    except (IndexError, ValueError):
+        return {"ok": False, "error": "stat_starttime_unparseable", "raw": text[:120]}
+    return {"ok": True, "starttime": starttime, "pid": pid}
+
+
+def _ns_inode(path: Path) -> dict[str, Any]:
+    try:
+        st = path.stat()
+    except FileNotFoundError:
+        return {"ok": False, "error": "ns_missing"}
+    except OSError as exc:
+        return {"ok": False, "error": type(exc).__name__}
+    return {"ok": True, "inode": int(st.st_ino), "dev": int(st.st_dev)}
+
+
+def _link_container_pid(
+    *,
+    name: str,
+    expected_id: str | None,
+    pid: int | None,
+) -> dict[str, Any]:
+    if not pid or int(pid) <= 1:
+        return {"ok": False, "error": "missing_or_invalid_pid", "pid": pid}
+    presence = _podman_presence(name)
+    if presence.get("state") != "present":
+        return {
+            "ok": False,
+            "error": "container_not_present_for_pid_link",
+            "presence": presence,
+            "pid": pid,
+        }
+    inspected = _podman_inspect_object(name)
+    if not inspected.get("ok"):
+        return {"ok": False, "error": "inspect_failed_for_pid_link", "detail": inspected}
+    obj = inspected["object"]
+    state = obj.get("State") if isinstance(obj.get("State"), dict) else {}
+    cid = str(obj.get("Id") or "")
+    live_pid = state.get("Pid")
+    if expected_id and cid and not (
+        cid == expected_id or cid.startswith(expected_id) or expected_id.startswith(cid)
+    ):
+        return {
+            "ok": False,
+            "error": "container_id_mismatch",
+            "expected_id": expected_id,
+            "observed_id": cid,
+        }
+    if live_pid is None or int(live_pid) != int(pid):
+        return {
+            "ok": False,
+            "error": "pid_mismatch_against_inspect",
+            "expected_pid": pid,
+            "observed_pid": live_pid,
+            "container_id": cid,
+        }
+    start = _proc_starttime(int(pid))
+    if not start.get("ok"):
+        return {"ok": False, "error": "proc_starttime_unreadable", "detail": start, "pid": pid}
+    ns = _ns_inode(Path(f"/proc/{int(pid)}/ns/user"))
+    if not ns.get("ok"):
+        return {"ok": False, "error": "userns_inode_unreadable", "detail": ns, "pid": pid}
+    return {
+        "ok": True,
+        "pid": int(pid),
+        "container_name": name,
+        "container_id": cid,
+        "starttime": start["starttime"],
+        "userns_inode": ns["inode"],
+    }
+
+
+def _sample_host_side_identity(pid: int, *, starttime: int) -> dict[str, Any]:
+    """Read maps/caps/ns from launching-host context; guard against PID reuse."""
+    live = _proc_starttime(pid)
+    if not live.get("ok"):
+        return {"ok": False, "error": "process_disappeared_during_sample", "detail": live}
+    if int(live["starttime"]) != int(starttime):
+        return {
+            "ok": False,
+            "error": "pid_reuse_detected",
+            "expected_starttime": starttime,
+            "observed_starttime": live["starttime"],
+        }
+    uid_raw = _read_proc_file(Path(f"/proc/{pid}/uid_map"))
+    gid_raw = _read_proc_file(Path(f"/proc/{pid}/gid_map"))
+    status_raw = _read_proc_file(Path(f"/proc/{pid}/status"))
+    ns = _ns_inode(Path(f"/proc/{pid}/ns/user"))
+    reader_ns = _ns_inode(Path("/proc/self/ns/user"))
+    if not uid_raw.get("ok") or not gid_raw.get("ok"):
+        return {
+            "ok": False,
+            "error": "host_side_maps_unreadable",
+            "uid_raw": uid_raw,
+            "gid_raw": gid_raw,
+        }
+    uid_map = parse_id_map(uid_raw["text"])
+    gid_map = parse_id_map(gid_raw["text"])
+    uid_map["reader_context"] = "launching_host"
+    gid_map["reader_context"] = "launching_host"
+    caps = parse_proc_status_capabilities(status_raw.get("text") or "")
+    # Re-check starttime after reads.
+    live_after = _proc_starttime(pid)
+    if not live_after.get("ok") or int(live_after.get("starttime") or -1) != int(starttime):
+        return {
+            "ok": False,
+            "error": "process_changed_during_sample",
+            "before": live,
+            "after": live_after,
+        }
+    return {
+        "ok": True,
+        "pid": pid,
+        "starttime": starttime,
+        "host_side_uid_map": uid_map,
+        "host_side_gid_map": gid_map,
+        "capabilities": caps,
+        "container_userns": ns,
+        "reader_userns": reader_ns,
+        "reader_uid": os.getuid(),
+        "reader_gid": os.getgid(),
+        "same_userns_as_reader": bool(
+            ns.get("ok")
+            and reader_ns.get("ok")
+            and ns.get("inode") == reader_ns.get("inode")
+        ),
+    }
+
+
 def _execute_security_identity_probe(
     *,
     image: str,
@@ -1232,84 +1381,229 @@ def _execute_security_identity_probe(
     host_uid: int,
     host_gid: int,
 ) -> dict[str, Any]:
-    """Synthetic probe for Cap* sets and keep-id userns mapping."""
+    """Synthetic probe: Cap* + keep-id via host-side procfs while container is alive."""
     name = _unique_name("secid")
+    started_names.append(name)
     marker_name = "security-identity-marker.txt"
     marker_path = workspace / marker_name
     if marker_path.exists():
         marker_path.unlink()
 
-    raw = _run_inspectable(
+    cmd, planned = build_command(
+        "podman",
         image=image,
         workspace=workspace,
-        inner=["/bin/sh", "-c", _inner_security_identity()],
-        name=name,
-        timeout=20,
         memory="128m",
         cpus="0.50",
         pids=64,
+        tmpfs_size="64m",
+        inner_command=["/bin/sh", "-c", _inner_security_identity()],
+        name=name,
         rm=False,
-        started_names=started_names,
     )
-    stdout = raw.get("stdout") or ""
-    uid_match = re.search(r"(?m)^CONTAINER_UID=(\d+)$", stdout)
-    gid_match = re.search(r"(?m)^CONTAINER_GID=(\d+)$", stdout)
-    uid_map_text = _parse_marker_block(stdout, "---UID_MAP---", "---GID_MAP---")
-    # GID map ends at STATUS_CAPS marker.
-    gid_map_text = _parse_marker_block(stdout, "---GID_MAP---", "---STATUS_CAPS---")
-    caps_text = _parse_marker_block(stdout, "---STATUS_CAPS---", "---END_STATUS_CAPS---")
+    argv_probe = scan_argv_safety(cmd, workspace=workspace)
+    started = time.monotonic()
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=_host_podman_env(),
+            start_new_session=True,
+        )
+    except OSError as exc:
+        return {
+            "probe": "security_identity",
+            "exit_code": 127,
+            "error": type(exc).__name__,
+            "capability": {"verdict": {"status": "NOT_TESTED", "attributed": False}},
+            "userns": {
+                "verdict": {
+                    "status": "NOT_TESTED",
+                    "reason": "launch_failed",
+                    "attributed": False,
+                }
+            },
+            "cleanup_observed": True,
+            "sanitized_command": sanitize_command(cmd, workspace),
+        }
 
-    caps_parsed = parse_proc_status_capabilities(caps_text)
-    cap_verdict = capability_drop_all_attributed(caps_parsed)
+    sample: dict[str, Any] | None = None
+    pid_link: dict[str, Any] = {"ok": False, "error": "not_sampled"}
+    container_id: str | None = None
+    inspect_controls: dict[str, Any] = {}
+    inspect_ok = False
+    timed_out = False
+    stdout = ""
+    stderr = ""
+    exit_code = 1
 
-    uid_map = parse_id_map(uid_map_text)
-    gid_map = parse_id_map(gid_map_text)
-    workspace_owner = workspace.stat().st_uid if workspace.exists() else None
-    marker_owner = marker_path.stat().st_uid if marker_path.is_file() else None
+    try:
+        for _ in range(80):
+            presence = _podman_presence(name)
+            if presence.get("state") == "present":
+                inspected = _podman_inspect_object(name)
+                if inspected.get("ok"):
+                    obj = inspected["object"]
+                    state = obj.get("State") if isinstance(obj.get("State"), dict) else {}
+                    container_id = str(obj.get("Id") or "")
+                    pid = state.get("Pid")
+                    parsed_controls = parse_podman_inspect([obj])
+                    if parsed_controls.get("ok"):
+                        inspect_controls = (
+                            parsed_controls.get("runtime_inspected_controls") or {}
+                        )
+                        inspect_ok = True
+                    pid_link = _link_container_pid(
+                        name=name, expected_id=container_id, pid=pid
+                    )
+                    if pid_link.get("ok"):
+                        # Wait briefly for marker write + READY marker.
+                        time.sleep(0.5)
+                        sample = _sample_host_side_identity(
+                            int(pid_link["pid"]),
+                            starttime=int(pid_link["starttime"]),
+                        )
+                        # Confirm linkage still matches the same container/PID.
+                        relink = _link_container_pid(
+                            name=name,
+                            expected_id=container_id,
+                            pid=int(pid_link["pid"]),
+                        )
+                        if not relink.get("ok") or relink.get("starttime") != pid_link.get(
+                            "starttime"
+                        ):
+                            sample = {
+                                "ok": False,
+                                "error": "container_identity_changed_during_sample",
+                                "pid_link_before": pid_link,
+                                "pid_link_after": relink,
+                            }
+                    break
+            if proc.poll() is not None:
+                break
+            time.sleep(0.1)
+
+        try:
+            stdout, stderr = proc.communicate(timeout=20)
+            exit_code = int(proc.returncode if proc.returncode is not None else 1)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except OSError:
+                proc.kill()
+            try:
+                stdout, stderr = proc.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                stdout, stderr = "", "communicate_timeout_after_kill"
+            exit_code = 124
+    finally:
+        presence_now = _podman_presence(name)
+        force_result = None
+        if presence_now.get("state") in {"present", "inspect_error"}:
+            force_result = _force_remove_container(name)
+        presence_after = _podman_presence(name)
+
+    stdout_s = sanitize_evidence_text(stdout or "")
+    uid_match = re.search(r"(?m)^CONTAINER_UID=(\d+)$", stdout_s)
+    gid_match = re.search(r"(?m)^CONTAINER_GID=(\d+)$", stdout_s)
     container_uid = int(uid_match.group(1)) if uid_match else None
     container_gid = int(gid_match.group(1)) if gid_match else None
+
+    ws_uid = workspace.stat().st_uid if workspace.exists() else None
+    ws_gid = workspace.stat().st_gid if workspace.exists() else None
+    marker_uid = marker_path.stat().st_uid if marker_path.is_file() else None
+    marker_gid = marker_path.stat().st_gid if marker_path.is_file() else None
+
+    caps_parsed = (sample or {}).get("capabilities") or {"ok": False, "error": "not_sampled"}
+    # Prefer host-side /proc/<pid>/status; fall back unavailable rather than argv.
+    cap_verdict = capability_drop_all_attributed(caps_parsed)
+
+    host_uid_map = (sample or {}).get("host_side_uid_map") or {
+        "ok": False,
+        "error": "not_sampled",
+    }
+    host_gid_map = (sample or {}).get("host_side_gid_map") or {
+        "ok": False,
+        "error": "not_sampled",
+    }
 
     userns_evidence = {
         "container_uid": container_uid,
         "container_gid": container_gid,
         "host_uid": host_uid,
         "host_gid": host_gid,
-        "uid_map": uid_map,
-        "gid_map": gid_map,
-        "workspace_owner_uid": workspace_owner,
-        "marker_owner_uid": marker_owner,
-        "userns_inode": (
-            re.search(r"(?m)^USERNS_INODE=(\S+)$", stdout).group(1)
-            if re.search(r"(?m)^USERNS_INODE=(\S+)$", stdout)
-            else None
-        ),
+        "workspace_owner_uid": ws_uid,
+        "workspace_owner_gid": ws_gid,
+        "marker_owner_uid": marker_uid,
+        "marker_owner_gid": marker_gid,
         "marker_written": bool(marker_path.is_file()),
+        "host_side_uid_map": host_uid_map,
+        "host_side_gid_map": host_gid_map,
+        "pid_link": pid_link,
+        "require_pid_link": True,
+        "sample_ok": bool((sample or {}).get("ok")),
+        "sample_error": None if (sample or {}).get("ok") else (sample or {}).get("error"),
+        "reader_uid": (sample or {}).get("reader_uid"),
+        "reader_gid": (sample or {}).get("reader_gid"),
+        "container_userns": (sample or {}).get("container_userns"),
+        "reader_userns": (sample or {}).get("reader_userns"),
     }
-    userns_verdict = userns_keep_id_attributed(userns_evidence)
+    if not (sample or {}).get("ok"):
+        userns_verdict = {
+            "status": "NOT_TESTED",
+            "reason": (sample or {}).get("error") or pid_link.get("error") or "host_side_sample_failed",
+            "attributed": False,
+            "pid_link": pid_link,
+            "sample": sample,
+        }
+    else:
+        userns_verdict = userns_keep_id_attributed(userns_evidence)
 
-    after = (raw.get("cleanup_meta") or {}).get("presence_after_cleanup") or {}
     return {
         "probe": "security_identity",
-        "exit_code": raw.get("exit_code"),
-        "stdout": sanitize_evidence_text(stdout),
-        "stderr": raw.get("stderr"),
+        "phase": "B3",
+        "exit_code": exit_code,
+        "timed_out": timed_out,
+        "duration_seconds": round(time.monotonic() - started, 3),
+        "stdout": stdout_s,
+        "stderr": sanitize_evidence_text(stderr or ""),
+        "planned_controls": planned,
+        "launcher_argv_controls": argv_probe.get("launcher_argv_controls") or {},
+        "runtime_inspected_controls": inspect_controls,
+        "inspect_ok": inspect_ok,
         "capability": {
             "parsed": caps_parsed,
             "verdict": cap_verdict,
+            "source": "host_side_proc_status",
         },
         "userns": {
-            "evidence": {
-                **{k: v for k, v in userns_evidence.items() if k not in {"uid_map", "gid_map"}},
-                "uid_map": uid_map,
-                "gid_map": gid_map,
-            },
+            "evidence": userns_evidence,
             "verdict": userns_verdict,
+            "source": "host_side_procfs",
         },
-        "runtime_inspected_controls": raw.get("runtime_inspected_controls") or {},
-        "inspect_ok": raw.get("inspect_ok"),
-        "cleanup_observed": after.get("state") == "absent",
-        "sanitized_command": raw.get("sanitized_command"),
-        "evidence_layers": raw.get("evidence_layers"),
+        "pid_link": pid_link,
+        "host_sample": {
+            "ok": bool((sample or {}).get("ok")),
+            "error": None if (sample or {}).get("ok") else (sample or {}).get("error"),
+            "pid": (sample or {}).get("pid"),
+            "starttime": (sample or {}).get("starttime"),
+        },
+        "cleanup_observed": presence_after.get("state") == "absent",
+        "force_cleanup": force_result,
+        "sanitized_command": sanitize_command(cmd, workspace),
+        "evidence_layers": {
+            "launcher_config": planned,
+            "executed_argv": argv_probe.get("launcher_argv_controls") or {},
+            "runtime_inspected": inspect_controls,
+            "argv_is_not_enforcement_proof": True,
+            "behavioral": {
+                "host_side_userns": userns_verdict.get("status"),
+                "capability": cap_verdict.get("status"),
+            },
+        },
     }
 
 
@@ -1883,6 +2177,101 @@ def _execute_p7(
     }
 
 
+def run_security_identity_only(
+    *,
+    image: str,
+    fixture_root: Path | None,
+) -> dict[str, Any]:
+    """Owner-gated identity probe only — does not execute or report P6."""
+    policy = resolve_uid_policy(runtime="podman")
+    report = assess()
+    runtime, reason = _runtime_choice(report)
+    if runtime != "podman":
+        _die(f"execute blocked: need podman rootless ready ({reason})")
+    selected = _select_image_for_runtime(report, "podman")
+    if not selected or selected != image:
+        _die(
+            "execute blocked: exact local Podman alpine/busybox image required; "
+            f"selected={selected!r} requested={image!r}"
+        )
+    if not report["container_runtime"]["podman"].get("rootless_verified"):
+        _die("execute blocked: podman rootless not verified")
+
+    created = False
+    if fixture_root is None:
+        fixture_root = Path(tempfile.mkdtemp(prefix="eos-sandbox-poc-"))
+        created = True
+    try:
+        digests = prepare_fixtures(fixture_root)
+    except AssertionError as exc:
+        _die(f"fixture path rejected: {exc}")
+
+    alpha = fixture_root / SYNTH_ALPHA
+    verify_workspace_ownership(alpha, policy)
+    started_names: list[str] = []
+    try:
+        probe = _execute_security_identity_probe(
+            image=image,
+            workspace=alpha,
+            started_names=started_names,
+            host_uid=int(policy["host_uid"]),
+            host_gid=int(policy["host_gid"]),
+        )
+    finally:
+        leftover = _cleanup_all(started_names)
+        if created:
+            cleanup_fixture_tree(fixture_root)
+
+    cap = (probe.get("capability") or {}).get("verdict") or {}
+    userns = (probe.get("userns") or {}).get("verdict") or {}
+    security_controls = {
+        "cap_drop_all": {
+            "status": cap.get("status") or "NOT_TESTED",
+            "reason": cap.get("reason"),
+            "attributed": cap.get("attributed"),
+        },
+        "userns_keep_id": {
+            "status": userns.get("status") or "NOT_TESTED",
+            "reason": userns.get("reason"),
+            "attributed": userns.get("attributed"),
+        },
+    }
+    identity_status = "PASS"
+    if security_controls["userns_keep_id"]["status"] != "PASS":
+        identity_status = security_controls["userns_keep_id"]["status"] or "NOT_TESTED"
+    elif security_controls["cap_drop_all"]["status"] != "PASS":
+        identity_status = security_controls["cap_drop_all"]["status"] or "NOT_TESTED"
+    if not probe.get("cleanup_observed"):
+        identity_status = "FAIL"
+
+    return {
+        "phase": "B3",
+        "runtime": "podman",
+        "image": image,
+        "uid_policy": policy,
+        "canary_sha256_initial": digests,
+        "mode": "security_identity_only",
+        "p1_p8_status": {tid: "NOT_TESTED" for tid in ALLOWED_TEST_IDS},
+        "results": [],
+        "security_identity_result": {
+            "status": identity_status,
+            "probe": probe.get("probe"),
+            "exit_code": probe.get("exit_code"),
+            "cleanup_observed": probe.get("cleanup_observed"),
+            "capability_evidence": probe.get("capability"),
+            "userns_evidence": probe.get("userns"),
+            "pid_link": probe.get("pid_link"),
+            "host_sample": probe.get("host_sample"),
+            "sanitized_command": probe.get("sanitized_command"),
+            "evidence_layers": probe.get("evidence_layers"),
+        },
+        "security_controls": security_controls,
+        "leftover_cleanup": leftover,
+        "execution_performed": True,
+        "p6_executed": False,
+    }
+
+
 def run_execute(
     *,
     image: str,
@@ -2039,6 +2428,14 @@ def main() -> int:
     parser.add_argument("--prepare-fixtures", action="store_true")
     parser.add_argument("--fixture-root", type=Path)
     parser.add_argument("--tests", default="P1,P2,P3,P4,P5,P6,P7,P8")
+    parser.add_argument(
+        "--security-identity-only",
+        action="store_true",
+        help=(
+            "Run only the B3 host-side capability/userns identity probe "
+            "(requires the triple Owner gate to execute; dry-run launches nothing)."
+        ),
+    )
     parser.add_argument("--execute", action="store_true")
     parser.add_argument("--allow-phase-b", action="store_true")
     parser.add_argument("--owner-authorize-runtime-execution", action="store_true")
@@ -2063,6 +2460,17 @@ def main() -> int:
     except AssertionError as exc:
         _die(str(exc))
 
+    if args.security_identity_only and args.tests != "P1,P2,P3,P4,P5,P6,P7,P8":
+        # Allow default catalog string; refuse mixing with an explicit subset.
+        # Users should not combine identity-only with --tests P6.
+        if args.tests.upper().replace(" ", "") not in {
+            "P1,P2,P3,P4,P5,P6,P7,P8",
+        }:
+            _die(
+                "--security-identity-only cannot be combined with a custom --tests "
+                "selection; omit --tests or use the default catalog string"
+            )
+
     for banned in ("EOS_SANDBOX_IMAGE", "EOS_SANDBOX_COMMAND", "EOS_SANDBOX_MOUNT"):
         if os.environ.get(banned):
             _die(f"refusing user-supplied {banned}; image/commands are catalog-fixed")
@@ -2086,7 +2494,7 @@ def main() -> int:
     uid_policy = resolve_uid_policy(runtime="podman")
 
     summary: dict[str, Any] = {
-        "phase": "B2",
+        "phase": "B3" if args.security_identity_only else "B2",
         "runtime": runtime,
         "runtime_reason": reason,
         "image": image,
@@ -2099,6 +2507,8 @@ def main() -> int:
             "cap_drop_all": {"status": "NOT_TESTED"},
             "userns_keep_id": {"status": "NOT_TESTED"},
         },
+        "mode": "security_identity_only" if args.security_identity_only else "catalog",
+        "p6_executed": False,
         "execution_barrier": (
             "owner_gate_ready_but_not_invoked"
             if not execute_authorized
@@ -2113,6 +2523,7 @@ def main() -> int:
                 "behavioral",
             ],
             "argv_is_not_enforcement_proof": True,
+            "userns_map_reader_context_required": True,
         },
     }
 
@@ -2133,6 +2544,24 @@ def main() -> int:
                 f"Owner gate set but execute still blocked ({block_reason}). "
                 "Provide an exact local alpine/busybox image in the Podman store."
             )
+        if args.security_identity_only:
+            executed = run_security_identity_only(
+                image=image,
+                fixture_root=args.fixture_root,
+            )
+            summary.update(executed)
+            if args.json:
+                print(json.dumps(summary, indent=2, sort_keys=True))
+            else:
+                print("Engineering OS sandbox PoC SECURITY-IDENTITY-ONLY complete")
+                print(f"image={image}")
+                sc = summary.get("security_controls") or {}
+                print(f"  cap_drop_all: {(sc.get('cap_drop_all') or {}).get('status')}")
+                print(f"  userns_keep_id: {(sc.get('userns_keep_id') or {}).get('status')}")
+                print(f"  p6_executed={summary.get('p6_executed')}")
+            identity = summary.get("security_identity_result") or {}
+            return 0 if identity.get("status") == "PASS" else 1
+
         executed = run_execute(
             image=image,
             test_ids=test_ids,
@@ -2156,31 +2585,96 @@ def main() -> int:
     os.chmod(plan_root, 0o700)
     try:
         prepare_fixtures(plan_root)
-        for test in plan_tests(plan_root, "podman", plan_image, test_ids=test_ids):
+        if args.security_identity_only:
+            alpha = plan_root / SYNTH_ALPHA
+            cmd, planned = build_command(
+                "podman",
+                image=plan_image if not plan_image.startswith("<") else plan_image,
+                workspace=alpha,
+                memory="128m",
+                cpus="0.50",
+                pids=64,
+                inner_command=["/bin/sh", "-c", _inner_security_identity()],
+                name="eos-sandbox-poc-secid-dryrun",
+                rm=False,
+            ) if not plan_image.startswith("<") else (
+                [
+                    "podman",
+                    "run",
+                    "--pull=never",
+                    "--read-only",
+                    "--network",
+                    "none",
+                    "--userns=keep-id",
+                    "--user",
+                    uid_policy["user_flag"],
+                    "--cap-drop",
+                    "ALL",
+                    "--security-opt",
+                    "no-new-privileges",
+                    "--memory",
+                    "128m",
+                    "--cpus",
+                    "0.50",
+                    "--pids-limit",
+                    "64",
+                    "--tmpfs",
+                    "/tmp:rw,noexec,nosuid,size=64m",
+                    "--mount",
+                    f"type=bind,src={alpha.resolve()},dst=/workspace,rw",
+                    "--workdir",
+                    "/workspace",
+                    "--name",
+                    "eos-sandbox-poc-secid-dryrun",
+                    plan_image,
+                    "/bin/sh",
+                    "-c",
+                    _inner_security_identity(),
+                ],
+                {"userns_keep_id": True, "cap_drop_all": True},
+            )
             summary["tests"].append(
                 {
-                    "id": test["id"],
-                    "title": test["title"],
-                    "sanitized_command": sanitize_command(
-                        test["command"], plan_root / SYNTH_ALPHA
-                    ),
-                    "required_controls": test["required_controls"],
-                    "planned_controls": test["planned_controls"],
-                    "assertion": test["assertion"],
+                    "id": "SECURITY_IDENTITY",
+                    "title": "Host-side capability and keep-id identity probe",
+                    "sanitized_command": sanitize_command(cmd, alpha),
+                    "planned_controls": planned,
                     "status": "NOT_TESTED",
+                    "p6_executed": False,
                     "evidence_note": (
-                        "planned_controls and argv scans are not enforcement proof; "
-                        "Owner execute must supply runtime inspect + behavioral evidence"
+                        "Dry-run only. Host-side /proc/<pid>/{uid,gid}_map sampling "
+                        "requires Owner triple-gate execute; in-container maps alone "
+                        "cannot PASS keep-id."
                     ),
                 }
             )
+        else:
+            for test in plan_tests(plan_root, "podman", plan_image, test_ids=test_ids):
+                summary["tests"].append(
+                    {
+                        "id": test["id"],
+                        "title": test["title"],
+                        "sanitized_command": sanitize_command(
+                            test["command"], plan_root / SYNTH_ALPHA
+                        ),
+                        "required_controls": test["required_controls"],
+                        "planned_controls": test["planned_controls"],
+                        "assertion": test["assertion"],
+                        "status": "NOT_TESTED",
+                        "evidence_note": (
+                            "planned_controls and argv scans are not enforcement proof; "
+                            "Owner execute must supply runtime inspect + behavioral evidence"
+                        ),
+                    }
+                )
     finally:
         cleanup_fixture_tree(plan_root)
 
     if args.json:
         print(json.dumps(summary, indent=2, sort_keys=True))
     else:
-        print("Engineering OS sandbox PoC launcher (Phase B2 harness; dry-run)")
+        phase_label = "B3 security-identity-only" if args.security_identity_only else "B2"
+        print(f"Engineering OS sandbox PoC launcher (Phase {phase_label}; dry-run)")
         print(f"runtime={runtime} reason={reason}")
         print(f"image={image}")
         print(
@@ -2188,6 +2682,7 @@ def main() -> int:
             f"block_reason={block_reason if blocked else None}"
         )
         print(f"uid_policy_status={uid_policy['status']}")
+        print(f"mode={summary.get('mode')} p6_executed={summary.get('p6_executed')}")
         print("P1-P8 status:")
         for key, value in summary["p1_p8_status"].items():
             print(f"  {key}: {value}")
