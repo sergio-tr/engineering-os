@@ -308,6 +308,28 @@ def make_handler(state: AppState) -> Callable[..., BaseHTTPRequestHandler]:
                     )
                     self._send(status, body, ctype)
                     return
+                if path == "/api/acp/status":
+                    status, body, ctype = _json_bytes(state.plane.acp_status())
+                    self._send(status, body, ctype)
+                    return
+                if path == "/api/acp/capabilities":
+                    status, body, ctype = _json_bytes(state.plane.acp_capabilities())
+                    self._send(status, body, ctype)
+                    return
+                if path == "/api/acp/sessions":
+                    project_id = (qs.get("project_id") or [None])[0]
+                    status, body, ctype = _json_bytes(
+                        state.plane.list_acp_sessions(project_id)
+                    )
+                    self._send(status, body, ctype)
+                    return
+                if path.startswith("/api/acp/sessions/") and path.count("/") == 4:
+                    execution_id = path.rsplit("/", 1)[-1]
+                    status, body, ctype = _json_bytes(
+                        state.plane.get_acp_session_for_execution(execution_id)
+                    )
+                    self._send(status, body, ctype)
+                    return
                 if path == "/api/goals":
                     project_id = (qs.get("project_id") or [None])[0]
                     status, body, ctype = _json_bytes(
@@ -563,6 +585,29 @@ def make_handler(state: AppState) -> Callable[..., BaseHTTPRequestHandler]:
                     return
                 if path == "/api/openclaw/refresh":
                     status, body, ctype = _json_bytes(state.plane.openclaw_refresh())
+                    self._send(status, body, ctype)
+                    return
+                if path == "/api/acp/simulate":
+                    # Synthetic only — never live ACP.
+                    if data.get("live"):
+                        status, body, ctype = _json_bytes(
+                            {
+                                "ok": False,
+                                "error": "live_acp_disabled",
+                                "sandbox_gate": state.plane.sandbox_gate,
+                            },
+                            403,
+                        )
+                        self._send(status, body, ctype)
+                        return
+                    orch = state.orchestrator
+                    status, body, ctype = _json_bytes(
+                        orch.simulate_acp(data["project_id"])
+                    )
+                    self._send(status, body, ctype)
+                    return
+                if path == "/api/acp/demo":
+                    status, body, ctype = _json_bytes(state.plane.run_acp_fixture_demo())
                     self._send(status, body, ctype)
                     return
                 status, body, ctype = _json_bytes(

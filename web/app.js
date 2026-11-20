@@ -640,6 +640,89 @@
     }
   });
 
+  $("btn-acp-status").addEventListener("click", async () => {
+    try {
+      const data = await api("/api/acp/status");
+      const el = $("acp-runtime-panel");
+      el.classList.remove("empty");
+      el.innerHTML = `
+        <div class="row">SANDBOX ${badge(data.sandbox_gate)} · Live ACP ${data.live_acp_enabled ? "ON" : "disabled"}</div>
+        <div class="meta">Synthetic backend: ${escapeHtml((data.synthetic && data.synthetic.backend) || "—")}</div>
+        <div class="meta">OpenClaw ACPX: ${escapeHtml((data.openclaw_acpx && data.openclaw_acpx.evidence_class) || "UNAVAILABLE")}</div>
+        <div class="meta">Sessions: ${escapeHtml(data.sessions)}</div>
+        <div class="meta">${escapeHtml(data.note || "")}</div>
+      `;
+    } catch (err) {
+      toast(err.message, true);
+    }
+  });
+
+  $("btn-acp-sessions").addEventListener("click", async () => {
+    try {
+      const q = selectedProjectId
+        ? `?project_id=${encodeURIComponent(selectedProjectId)}`
+        : "";
+      const sessions = await api("/api/acp/sessions" + q);
+      const ul = $("acp-session-list");
+      if (!sessions.length) {
+        ul.innerHTML = `<li class="empty">No ACP sessions</li>`;
+        return;
+      }
+      ul.innerHTML = sessions
+        .map(
+          (s) => `<li>
+          <div class="row"><strong>${escapeHtml(s.session_id)}</strong> ${badge(s.status)} <span class="badge SYNTHETIC">SYNTHETIC</span></div>
+          <div class="meta">exec ${escapeHtml(s.execution_id)} · task ${escapeHtml(s.task_id)} · ${escapeHtml(s.acp_backend)}</div>
+          <button type="button" data-acp-exec="${escapeHtml(s.execution_id)}">Timeline</button>
+        </li>`
+        )
+        .join("");
+    } catch (err) {
+      toast(err.message, true);
+    }
+  });
+
+  document.body.addEventListener("click", async (ev) => {
+    const t = ev.target;
+    if (!(t instanceof HTMLElement) || !t.dataset.acpExec) return;
+    try {
+      const detail = await api(
+        `/api/acp/sessions/${encodeURIComponent(t.dataset.acpExec)}`
+      );
+      const el = $("acp-timeline");
+      el.classList.remove("empty");
+      const events = detail.events || [];
+      el.innerHTML = `
+        <div class="row">${escapeHtml(detail.session.session_id)} ${badge(detail.session.status)} ${badge(detail.mode)}</div>
+        <ul class="list compact">${
+          events.length
+            ? events
+                .map(
+                  (e) =>
+                    `<li>${escapeHtml(e.timestamp)} · ${escapeHtml(e.event_type)}</li>`
+                )
+                .join("")
+            : "<li>No events</li>"
+        }</ul>
+      `;
+    } catch (err) {
+      toast(err.message, true);
+    }
+  });
+
+  $("btn-acp-demo").addEventListener("click", async () => {
+    try {
+      const result = await api("/api/acp/demo", { method: "POST", body: "{}" });
+      selectedProjectId = result.project_id;
+      toast("SYNTHETIC ACP demo completed");
+      await refresh();
+      $("btn-acp-status").click();
+      $("btn-acp-sessions").click();
+    } catch (err) {
+      toast(err.message, true);
+    }
+  });
+
   $("btn-orch-plan").addEventListener("click", async () => {
     if (!selectedProjectId) return toast("Select a project first", true);
     try {

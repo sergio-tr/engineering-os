@@ -332,6 +332,27 @@ class SequentialOrchestrator:
             "sandbox_gate": self.plane.sandbox_gate,
         }
 
+    def simulate_acp(self, project_id: str) -> Dict[str, Any]:
+        """Select next eligible task and run synthetic ACP through session manager."""
+        existing = self.plane.repo.get_claim(project_id)
+        if existing and existing.get("execution_id"):
+            return {
+                "action": "claim_held",
+                "execution_id": existing.get("execution_id"),
+            }
+        task_id = self.next_eligible_task(project_id)
+        if not task_id:
+            return {"action": "idle", "reason": "no_eligible_task"}
+        result = self.plane.simulate_acp_task(task_id)
+        execution = result["execution"]
+        self.plane.repo.set_claim(
+            project_id,
+            execution_id=execution["execution_id"],
+            task_id=task_id,
+            claim_token=uuid.uuid4().hex,
+        )
+        return {"action": "acp_dispatched", **result}
+
     def build_plan(self, project_id: str) -> Dict[str, Any]:
         """Deterministic orchestration plan from local + observed external state."""
         self.plane.get_project(project_id)
