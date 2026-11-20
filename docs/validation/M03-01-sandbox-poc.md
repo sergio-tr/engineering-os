@@ -1,85 +1,83 @@
-# M03-01 validation — External sandbox PoC (Phase A)
+# M03-01 validation — External sandbox PoC (Phase B1 evidence hardening)
 
 **Explicit statements:**
 
-- No OCI container was executed.
+- No OCI container was executed in this corrective pass.
 - No image was pulled.
 - No live Cursor ACP session occurred.
 - P1–P8 runtime isolation results are **NOT_TESTED**.
 - SANDBOX gate remains **NOT_TESTED**.
-- `--execute` / `--allow-phase-b` are hard-refused in Phase A.
+- M03-01 remains **PLANNED**.
 
-## M03-00 integration evidence
+## Runtime evidence model
 
-| Field | Value |
-|-------|--------|
-| Merge commit on `main` | `3414c7f8c3cc0656f2e170343a6379825900f266` |
-| Feature tip parent | `ccbbe91f3107131c4ce8945880805fa6b1fe91a4` |
-| Base parent | `d631f406864b7d1f3fbba34d5c2531044a238aab` |
-| Subject | `docs: design external sandbox isolation boundaries` |
-| Committer | GitHub |
-| PR number | Not present in local merge message; not invented |
+| Layer | Field(s) | May claim enforcement? |
+|-------|----------|------------------------|
+| 1. Launcher config | `planned_controls` | No (intent only) |
+| 2. Executed argv | `launcher_argv_controls`, argv safety scan | No (configuration only) |
+| 3. Runtime inspect | `runtime_inspected_controls` via `podman inspect` | Partial (config observed) |
+| 4. Behavioral | probes, canaries, OOM/fork/timeout attribution | Required for PASS |
 
-## Security hardening corrections (Phase A review)
+`control_evidence_source` must be `runtime_inspected` or `runtime_inspected_and_behavioral`.
+Provenance `argv_scan_only` / `launcher_argv` fails closed.
 
-| ID | Finding | Correction |
-|----|---------|------------|
-| C1 | `podman --version` must not imply rootless | Preflight separates binary / operational / rootless / isolation-untested; Docker rootless requires daemon evidence only |
-| C2 | Docker-local images credited Podman readiness | Image stores are runtime-specific; no cross-credit |
-| C3 | Shell fallbacks could fake denials | Assertion specs require exit codes, controls, canaries; forbid marker-only PASS |
-| C4 | `keep-id` + `--user 65532` ownership risk | Planner omits keep-id; documents fail-closed UID policy gate for Phase B |
-| C5 | Fixture roots could target unsafe paths | Approved temp-prefix validation, symlink/repo rejection, marker gating |
-| C6 | Execute flags must not launch | Hard refuse of `--execute` / `--allow-phase-b`; no launch path |
-| C7 | Fully qualified Podman refs missed | Recognize `docker.io/library/alpine:<tag>` etc.; select exact local refs only |
-| C8 | P5 unconditional exit risk | Separate IP/DNS probes; either success FAILs; no unconditional exit PASS |
-| C9 | Fixture root still too permissive | Dedicated named subdir, ownership, 0700, marker v1, structure checks |
-| C10 | Planned controls as “observed” | Evaluator requires `runtime_observed` evidence; rejects plan copies |
+## P1–P8 assertion requirements
 
-## Environment / runtime capability matrix
+| ID | PASS requires |
+|----|----------------|
+| P1 | Exit 0 + host workspace file + runtime inspect of mount/RO/user |
+| P2 | Probe markers + `CONTAINER_PATH_KIND` in {absent, present_denied} + canary unchanged + inspect |
+| P3 | Same path model + no beta marker content + canary unchanged |
+| P4 | Same path model + no secret marker content + canary unchanged |
+| P5 | `IP_PROBE_STATUS=executed_denied` and `DNS_PROBE_STATUS=executed_denied`; unavailable fails; NETNS + NetworkMode=none |
+| P6 | Attributable memory (OOM/cgroup), PIDs (fork denied), wall-clock (host timeout + cleanup); CPU `NOT_TESTED` unless separately proven; no PASS with missing mandatory dimension |
+| P7 | Reliable absence after success (`--rm`) and abnormal stop; inspect errors ≠ absence; distinguish auto vs forced cleanup |
+| P8 | `SOCKET_VISIBLE=0` + inspect confirms no socket binds |
+
+## Corrections applied (R1–R6)
+
+| ID | Correction |
+|----|------------|
+| R1 | Separated evidence layers; argv no longer labeled runtime-observed |
+| R2 | Removed hard-coded path kinds; container probes emit classification |
+| R3 | Probe status enum; missing tools cannot count as denial |
+| R4 | Attribution gates for memory/PIDs/wall-clock; CPU NOT_TESTED by default |
+| R5 | Named containers, inspect-aware presence, forced cleanup, timeout reaping |
+| R6 | Safety constraints preserved; fail-closed not weakened |
+
+## Current host readiness
 
 | Capability | Observation |
 |------------|-------------|
-| OS | Ubuntu 22.04 (from os-release) |
-| Kernel family | Linux with WSL2 indicators present |
-| Podman binary | Present on current host preflight |
-| Podman operational / rootless | Operational; rootless verified via `podman info` |
-| Podman-local alpine | Not ready (no local image in Podman store) |
-| Docker binary | Present |
-| Docker rootless (daemon-authoritative) | Not verified |
-| Docker context path heuristic | Explicitly **not** used as authority |
-| User namespaces / cgroup v2 | Indicators present; enforcement untested |
-| Docker-local alpine | Present; does **not** satisfy Podman image readiness |
-| Block reason (fail closed) | `podman_rootless_but_no_local_image` |
+| Podman rootless | Verified |
+| Exact local alpine/busybox in Podman store | Not ready (`localhost/3.20:latest` rejected) |
+| Block reason | `podman_rootless_but_no_local_image` |
 
-## P1–P8 status
-
-| ID | Status |
-|----|--------|
-| P1 | NOT_TESTED |
-| P2 | NOT_TESTED |
-| P3 | NOT_TESTED |
-| P4 | NOT_TESTED |
-| P5 | NOT_TESTED |
-| P6 | NOT_TESTED |
-| P7 | NOT_TESTED |
-| P8 | NOT_TESTED |
-
-## Static validation performed
+## Static validation
 
 | Check | Result |
 |-------|--------|
-| AST/syntax of harness modules | Executed |
-| `assertions.py` self-check | Executed (temp only) |
-| `preflight.py` read-only | Executed |
-| `run_poc.py` dry-run | Executed (no containers) |
-| Execute-flag refusal | Executed |
-| Unsafe fixture-root rejection | Covered in assertions self-check |
-| Container launch | Not performed |
+| AST/syntax | Executed |
+| assertions self-check | Executed |
+| preflight / dry-run | Executed (no containers) |
+| Partial Owner gate refusal | Executed |
+| Contract validation | Executed |
+| Container launch | **Not performed** |
 
-## Owner prerequisites for Phase B
+## Owner-only execute (later)
 
-1. Provide a daemon-verified rootless runtime (Podman preferred).
-2. Ensure a local image exists in **that runtime’s** store (`--pull=never`).
-3. Resolve UID/workspace ownership mapping and fail closed if unverified.
-4. Authorize a follow-up increment that implements execution + evidence capture.
-5. Do not treat Phase A dry-run output as SANDBOX PASS.
+```bash
+python3 -B scripts/sandbox/run_poc.py \
+  --execute --allow-phase-b --owner-authorize-runtime-execution \
+  --tests P1,P2,P3,P4,P5,P6,P7,P8 --json
+```
+
+Requires an exact local alpine/busybox ref in the Podman store first.
+
+## Remaining limitations
+
+1. No acceptable Podman-local alpine/busybox image on the current host.
+2. CPU quota not attributed in default P6 (explicit `NOT_TESTED`).
+3. `userns=keep-id` may not always appear in inspect; not required for P1 PASS.
+4. Alpine image toolset may lack DNS utilities → P5 correctly FAILs as unavailable until tooling exists.
+5. Runtime execution remains unauthorized for agents in this pass.

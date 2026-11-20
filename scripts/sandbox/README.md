@@ -1,80 +1,54 @@
-# Sandbox PoC harness (M03-01 Phase A)
+# Sandbox PoC harness (M03-01 Phase B1)
 
-Synthetic, fail-closed preparation tooling for the Engineering OS external isolation proof of concept.
+Synthetic, fail-closed isolation harness for Engineering OS.
 
-## Scope
+## Evidence layers
 
-- Read-only runtime preflight with independent rootless verification.
-- Runtime-specific local image discovery (Docker store ≠ Podman store).
-- Synthetic fixture helpers with approved disposable-root checks.
-- Dry-run launcher that prints sanitized OCI commands and explicit assertion specs for P1–P8.
-- **No container execution in Phase A.**
-- **`--execute` / `--allow-phase-b` are hard-refused in this increment.**
+1. **Launcher configuration** — planned flags (intent).
+2. **Executed argv** — safety-scanned subprocess arguments (**not** enforcement proof).
+3. **Runtime inspect** — read-only `podman inspect` of the started container.
+4. **Behavioral evidence** — probe markers, canaries, attributable limit/cleanup signals.
 
-## Rootless rules
+Do not treat argv scans as independently observed runtime enforcement.
 
-| Runtime | Binary present | Operational | Rootless verified | Local image in same runtime store |
-|---------|----------------|-------------|-------------------|-----------------------------------|
-| Podman (preferred) | required | `podman info` succeeds | `host.security.rootless` (or equivalent) true | required |
-| Docker (fallback) | required | `docker info` succeeds | daemon `Rootless=true` or `name=rootless` security option | required |
+## Scope and safety
 
-Not accepted as rootless proof:
+- Rootless Podman only for execute
+- Exact local alpine/busybox image; `--pull=never`
+- No user-supplied image/command/mount inputs
+- No privileged mode, no runtime socket mounts, network `none`
+- `--userns=keep-id` + `--user <host_uid>:<host_gid>`
+- Triple Owner gate required to launch containers
+- Fixed P1–P8 catalog only
 
-- `podman --version` / `docker --version` alone
-- Docker context socket path heuristics alone
+## Commands
 
-## UID / workspace policy (P1 gate)
-
-The planner uses `--user 65532:65532` and **omits** `--userns=keep-id` to avoid encoding an unverified pairing.
-
-Before Phase B execution, ownership mapping must be established and the launcher must fail closed if it cannot verify that the disposable workspace is writable by the selected container user.
-
-## Fixture path safety
-
-`--prepare-fixtures` only accepts a **dedicated** uniquely named subdirectory:
-
-- Name must match `eos-sandbox-poc-<unique>`
-- Must resolve under an approved disposable prefix (default: system temp dir)
-- Must not be the temp parent directory itself
-- Must be owned by the current user with owner-only permissions (0700)
-- Symlinked roots or symlink descendants are rejected
-- Marker `.eos-sandbox-poc` must contain the expected synthetic v1 content
-- Cleanup is allowed only for verified, owned, marked dedicated roots
-
-Optional override: `EOS_SANDBOX_FIXTURE_PREFIX` (must itself resolve under an approved prefix).
-
-## Phase A commands
+Safe dry-run / unit checks:
 
 ```bash
-python3 scripts/sandbox/assertions.py
-python3 scripts/sandbox/preflight.py
-python3 scripts/sandbox/preflight.py --json
-python3 scripts/sandbox/run_poc.py
-python3 scripts/sandbox/run_poc.py --json
+python3 -B scripts/sandbox/assertions.py
+python3 -B scripts/sandbox/preflight.py
+python3 -B scripts/sandbox/run_poc.py --json
 ```
 
-Optional fixture preparation (no containers):
+Owner-only execute (later; launches containers):
 
 ```bash
-python3 scripts/sandbox/run_poc.py --prepare-fixtures --fixture-root /tmp/eos-sandbox-poc-XXXX
+python3 -B scripts/sandbox/run_poc.py \
+  --execute \
+  --allow-phase-b \
+  --owner-authorize-runtime-execution \
+  --tests P1,P2,P3,P4,P5,P6,P7,P8 \
+  --json
 ```
 
-## Negative-test acceptance (future Phase B)
+## Assertion highlights
 
-Evidence must distinguish **planned controls** (launcher intent) from **runtime-observed controls** (independent probes). Copying planned booleans into observed evidence is invalid.
+- P2–P4: container emits `CONTAINER_PATH_KIND=...`; host canary hashes; generic failures without probe markers cannot PASS
+- P5: IP/DNS must be `executed_denied`; `unavailable` fails
+- P6: attributable memory/PIDs/wall-clock; CPU may be `NOT_TESTED`
+- P7: presence checks; inspect errors are not absence; auto vs forced cleanup recorded
 
-P2–P5 must not PASS from shell fallback strings. Required evidence includes exit status, runtime-observed controls, host canary integrity, and absent-vs-denied classification where applicable.
+## Status
 
-P5 records IP and DNS probe outcomes separately; either succeeding is FAIL. Planned `--network none` alone is insufficient.
-
-P6 must record separate memory/CPU/PID/tmpfs/wall-clock dimensions; tmpfs-full ≠ memory limit proof.
-
-P7 requires independently observed cleanup; `--rm` intent alone is insufficient.
-
-## Local image references
-
-Preflight recognizes short and fully qualified local refs (for example `alpine:3.20` and `docker.io/library/alpine:3.20`) **within the selected runtime store only**. It never rewrites missing tags to `latest` and never credits another runtime’s image store.
-
-## Phase B
-
-Not authorized here. No working container-launch path is provided in this increment.
+P1–P8 and SANDBOX remain **NOT_TESTED** until Owner-authorized execute evidence is reviewed.
