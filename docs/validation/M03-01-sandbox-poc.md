@@ -1,104 +1,67 @@
-# M03-01 validation — External sandbox PoC (Phase B2 evidence closure)
+# M03-01 validation — External sandbox PoC (Phase B3 userns evidence)
 
 **Explicit statements:**
 
-- No OCI container was executed in this B2 implementation pass.
+- No OCI container was executed in this B3 implementation pass.
 - No image was pulled.
 - No live Cursor ACP session occurred.
-- Historical Owner evidence for P1–P5, P7 and P8 is retained outside this repository path and is **not** rewritten here.
-- P6 CPU, `cap_drop_all` process sets, and `userns_keep_id` mapping remain **NOT_TESTED** until Owner-authorized B2 execute.
+- Historical B2 evidence (`p6-b2.json`) is retained and **not** rewritten.
+- B2 accredited CPU and capabilities; B2 `userns_keep_id` remains FAIL in that archive.
+- B3 host-side userns attribution remains **NOT_TESTED** until Owner-authorized execute.
 - SANDBOX gate remains **NOT_TESTED**.
 - M03-01 remains **PLANNED**.
 
-## Runtime evidence model
+## B2 defect (mapping semantics)
 
-| Layer | Field(s) | May claim enforcement? |
-|-------|----------|------------------------|
-| 1. Launcher config | `planned_controls` | No (intent only) |
-| 2. Executed argv | `launcher_argv_controls`, argv safety scan | No (configuration only) |
-| 3. Runtime inspect | `runtime_inspected_controls` via `podman inspect` | Partial (config observed) |
-| 4. Behavioral | probes, canaries, OOM/fork/timeout/CPU throttle, Cap*, uid_map | Required for PASS |
+`id_maps_cover_identity()` treated the second column of an in-container `uid_map` as the launching host UID. That column is reader-relative. Nested rootless Podman can yield `1000 0 1` inside the container while the composed path is still `1000 → 0 → 1000` on the host. B3 rejects in-container maps as host proof.
 
-`control_evidence_source` must be `runtime_inspected` or `runtime_inspected_and_behavioral`.
-Provenance `argv_scan_only` / `launcher_argv` fails closed.
+## B3 host-side evidence model
 
-## P1–P8 assertion requirements
+| Step | Evidence |
+|------|----------|
+| 1 | Start synthetic identity container (unchanged isolation flags); hold bounded window |
+| 2 | Resolve PID via `podman inspect`; link PID ↔ container id |
+| 3 | Record `/proc/<pid>/stat` starttime; re-check after sampling (PID-reuse guard) |
+| 4 | Read `/proc/<pid>/uid_map`, `gid_map`, `ns/user`, `status` **from the launcher** |
+| 5 | Tag maps with `reader_context=launching_host` |
+| 6 | Translate container euid/egid through those maps to launching UID/GID |
+| 7 | Verify workspace + marker ownership UID **and** GID |
+| 8 | Force cleanup; confirm absence |
 
-| ID | PASS requires |
-|----|----------------|
-| P1 | Exit 0 + host workspace file + runtime inspect of mount/RO/user |
-| P2 | Probe markers + `CONTAINER_PATH_KIND` in {absent, present_denied} + canary unchanged + inspect |
-| P3 | Same path model + no beta marker content + canary unchanged |
-| P4 | Same path model + no secret marker content + canary unchanged |
-| P5 | `IP_PROBE_STATUS=executed_denied` and `DNS_PROBE_STATUS=executed_denied`; unavailable fails; NETNS + NetworkMode=none |
-| P6 | Attributable memory (OOM/cgroup), PIDs (fork denied), wall-clock (host timeout + cleanup), **and** CPU (`cpu.max` matches `--cpus=0.50` + throttle delta on container cgroup); missing CPU → FAIL when required |
-| P7 | Reliable absence after success (`--rm`) and abnormal stop; inspect errors ≠ absence; distinguish auto vs forced cleanup |
-| P8 | `SOCKET_VISIBLE=0` + inspect confirms no socket binds |
+PASS requires all of the above. Missing/stale/ambiguous evidence → `NOT_TESTED` or `FAIL`. Pattern `1000 0 1` alone never PASS.
 
-## B2 security evidence schemas
+## `--security-identity-only`
 
-### CPU (`cpu_evidence`)
-
-| Field | Meaning |
-|-------|---------|
-| `configured_cpus` | Expected quota (0.50) |
-| `cpu_max` | Parsed container `cpu.max` (quota/period/cpus_equiv) |
-| `cpu_stat_before` / `cpu_stat_after` | Parsed `cpu.stat` samples |
-| `cpu_stat_delta` | Deltas for usage/periods/throttled counters |
-| `cgroup.path` | Resolved container cgroup directory |
-| `container_id` | Linked container identity |
-| `attribution` | `quota_and_throttle` or non-PASS reason |
-
-Acceptance: quota matches configured CPUs (tolerance 0.05) **and** `nr_throttled` or `throttled_usec` increases. Empty/missing cgroup → `NOT_TESTED`.
-
-### Capabilities (`capability_evidence`)
-
-| Field | Meaning |
-|-------|---------|
-| `parsed.fields` | CapInh/Prm/Eff/Bnd/Amb, NoNewPrivs, Seccomp |
-| `verdict.status` | PASS / FAIL / NOT_TESTED |
-| `verdict.reason` | Attribution note |
-
-Acceptance: CapPrm, CapEff, CapBnd, CapAmb all zero; NoNewPrivs=1. Argv `--cap-drop ALL` alone is not proof.
-
-### User namespace (`userns_evidence`)
-
-| Field | Meaning |
-|-------|---------|
-| `container_uid` / `container_gid` | Effective IDs inside container |
-| `host_uid` / `host_gid` | Launching host identity |
-| `uid_map` / `gid_map` | Parsed `/proc/self/{uid,gid}_map` |
-| `workspace_owner_uid` / `marker_owner_uid` | Host-side ownership checks |
-| `verdict.status` | PASS / FAIL / NOT_TESTED |
-
-Acceptance: euid/egid match host; maps cover that identity; workspace marker owned by host UID. Inspect `userns_keep_id` boolean alone is insufficient.
-
-Top-level execute summary also exposes `security_controls.cap_drop_all` and `security_controls.userns_keep_id`.
+| Property | Behavior |
+|----------|----------|
+| Dry-run | Plans probe only; `execution_performed=false`; `p6_executed=false` |
+| Execute | Requires triple Owner gate; runs identity probe only |
+| Catalog | Does not mark P1–P8 as executed |
+| Output | `security_controls` + `security_identity_result` |
 
 ## Static validation (this pass)
 
 | Check | Result |
 |-------|--------|
-| AST/syntax | To be executed in B2 validation |
-| assertions self-check (incl. mocked CPU/caps/userns) | To be executed |
-| P6 dry-run | To be executed (no containers) |
-| Contract validation | To be executed |
+| AST/syntax | Executed |
+| assertions self-check (nested/host-side cases) | Executed |
+| Contract validation | Executed |
+| `--security-identity-only` dry-run | Executed (no containers) |
 | Container launch | **Not performed** |
 
-## Owner-only execute (later; B2 closure)
+## Owner-only execute (later; B3)
 
 ```bash
 python3 -B scripts/sandbox/run_poc.py \
   --execute --allow-phase-b --owner-authorize-runtime-execution \
-  --tests P6 --json
+  --security-identity-only --json
 ```
 
-Archive new `p6.json` separately from historical partial P6 evidence. Do not rewrite prior PASS files for P1–P5/P7/P8.
+Archive as `p6-b3-userns.json` (or `security-identity-b3.json`) beside historical `p6-b2.json`. Record matching `main` SHA.
 
 ## Remaining limitations
 
-1. Historical Owner P6 evidence remains CPU-incomplete until a new authorized P6 execute.
-2. `userns_keep_id` / `cap_drop_all` may still appear `false` in `podman inspect`; B2 relies on process/cgroup behavioral evidence instead.
-3. CPU attribution requires a readable container-scoped cgroup; ancestor counters are rejected.
-4. Runtime execution remains unauthorized for agents in this pass.
-5. M03-02 independent audit is still required before SANDBOX PASS.
+1. Host-side `/proc/<pid>` must be readable by the launcher; otherwise fail closed.
+2. Nested composition fallback requires an independently proven parent relationship (not assumed from `podman unshare` alone).
+3. Historical B2 userns FAIL is preserved for audit trail.
+4. M03-02 independent audit still required before SANDBOX PASS.

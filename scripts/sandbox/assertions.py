@@ -908,26 +908,210 @@ def capability_drop_all_attributed(caps: dict[str, Any]) -> dict[str, Any]:
 
 
 def parse_id_map(text: str) -> dict[str, Any]:
-    """Parse ``uid_map`` / ``gid_map`` lines: ``container_id host_id length``."""
+    """Parse ``uid_map`` / ``gid_map`` lines with explicit column semantics.
+
+    Columns (kernel ``user_namespaces(7)``):
+      1. ``inside_id`` — ID in the mapped namespace
+      2. ``reader_relative_id`` — corresponding ID in the namespace of the *reader*
+      3. ``length`` — contiguous range length
+
+    The second column is **not** an unconditional launching-host ID. Its meaning
+    depends on which user namespace performed the read.
+    """
     raw = text or ""
     rows: list[dict[str, int]] = []
     for line in raw.splitlines():
         parts = line.strip().split()
-        if len(parts) != 3:
+        if not parts:
             continue
+        if len(parts) != 3:
+            return {"ok": False, "error": "malformed_id_map_line", "raw": line[:80]}
         try:
-            rows.append(
-                {
-                    "container_id": int(parts[0]),
-                    "host_id": int(parts[1]),
-                    "length": int(parts[2]),
-                }
-            )
+            inside_id = int(parts[0])
+            reader_relative_id = int(parts[1])
+            length = int(parts[2])
         except ValueError:
             return {"ok": False, "error": "malformed_id_map_line", "raw": line[:80]}
+        if length <= 0:
+            return {"ok": False, "error": "non_positive_map_length", "raw": line[:80]}
+        if inside_id < 0 or reader_relative_id < 0:
+            return {"ok": False, "error": "negative_map_id", "raw": line[:80]}
+        rows.append(
+            {
+                "inside_id": inside_id,
+                "reader_relative_id": reader_relative_id,
+                "length": length,
+                # Legacy aliases retained only for older callers/tests.
+                "container_id": inside_id,
+                "host_id": reader_relative_id,
+            }
+        )
     if not rows:
         return {"ok": False, "error": "empty_id_map"}
-    return {"ok": True, "rows": rows}
+
+    # Reject overlapping inside ranges (ambiguous translation).
+    ordered = sorted(rows, key=lambda r: r["inside_id"])
+    for prev, cur in zip(ordered, ordered[1:]):
+        prev_end = prev["inside_id"] + prev["length"]
+        if cur["inside_id"] < prev_end:
+            return {"ok": False, "error": "overlapping_map_ranges", "rows": rows}
+    return {"ok": True, "rows": rows, "reader_context": "unspecified"}
+
+
+def translate_id_through_map(mapping: dict[str, Any], inside_id: int) -> dict[str, Any]:
+    """Translate one inside-namespace ID through a parsed map."""
+    if not mapping.get("ok"):
+        return {"ok": False, "error": mapping.get("error") or "map_unavailable"}
+    for row in mapping.get("rows") or []:
+        start = int(row["inside_id"])
+        length = int(row["length"])
+        rel_start = int(row["reader_relative_id"])
+        if start <= inside_id < start + length:
+            return {
+                "ok": True,
+                "inside_id": inside_id,
+                "reader_relative_id": rel_start + (inside_id - start),
+            }
+    return {"ok": False, "error": "id_unmapped", "inside_id": inside_id}
+
+
+def compose_nested_id_translation(
+    *,
+    child_map: dict[str, Any],
+    parent_map: dict[str, Any],
+    inside_id: int,
+) -> dict[str, Any]:
+    """Compose child→parent then parent→grandparent (launching host) translations.
+
+    Requires an independently established parent relationship; this helper only
+    performs arithmetic once both maps are supplied.
+    """
+    step1 = translate_id_through_map(child_map, inside_id)
+    if not step1.get("ok"):
+        return {"ok": False, "error": "child_map_translation_failed", "step1": step1}
+    mid = int(step1["reader_relative_id"])
+    step2 = translate_id_through_map(parent_map, mid)
+    if not step2.get("ok"):
+        return {
+            "ok": False,
+            "error": "parent_map_translation_failed",
+            "step1": step1,
+            "step2": step2,
+        }
+    return {
+        "ok": True,
+        "inside_id": inside_id,
+        "intermediate_id": mid,
+        "host_id": int(step2["reader_relative_id"]),
+        "steps": [step1, step2],
+    }
+
+
+def host_side_maps_cover_launching_identity(
+    uid_map: dict[str, Any],
+    gid_map: dict[str, Any],
+    *,
+    container_uid: int,
+    container_gid: int,
+    launching_uid: int,
+    launching_gid: int,
+) -> dict[str, Any]:
+    """Evaluate maps read from the *launching host* process context.
+
+    When ``/proc/<container_pid>/uid_map`` is read by the launcher, the second
+    column is relative to the launcher's user namespace — i.e. the launching
+    host identity for a normal WSL/rootless session.
+    """
+    if uid_map.get("reader_context") == "in_container" or gid_map.get("reader_context") == "in_container":
+        return {
+            "status": "FAIL",
+            "reason": "in_container_map_cannot_prove_launching_host_identity",
+            "attributed": False,
+        }
+    if not uid_map.get("ok") or not gid_map.get("ok"):
+        return {
+            "status": "NOT_TESTED",
+            "reason": "host_side_uid_map_or_gid_map_unavailable",
+            "attributed": False,
+        }
+    if uid_map.get("reader_context") != "launching_host" or gid_map.get("reader_context") != "launching_host":
+        return {
+            "status": "NOT_TESTED",
+            "reason": "map_reader_context_not_launching_host",
+            "attributed": False,
+        }
+
+    uid_tr = translate_id_through_map(uid_map, container_uid)
+    gid_tr = translate_id_through_map(gid_map, container_gid)
+    uid_ok = bool(uid_tr.get("ok")) and int(uid_tr.get("reader_relative_id", -1)) == launching_uid
+    gid_ok = bool(gid_tr.get("ok")) and int(gid_tr.get("reader_relative_id", -1)) == launching_gid
+    if not uid_ok or not gid_ok:
+        return {
+            "status": "FAIL",
+            "reason": "host_side_map_does_not_match_launching_identity",
+            "attributed": False,
+            "uid_ok": uid_ok,
+            "gid_ok": gid_ok,
+            "uid_translation": uid_tr,
+            "gid_translation": gid_tr,
+        }
+    return {
+        "status": "PASS",
+        "reason": "host_side_maps_cover_launching_uid_and_gid",
+        "attributed": True,
+        "uid_ok": True,
+        "gid_ok": True,
+        "uid_translation": uid_tr,
+        "gid_translation": gid_tr,
+    }
+
+
+def nested_maps_cover_launching_identity(
+    *,
+    child_uid_map: dict[str, Any],
+    child_gid_map: dict[str, Any],
+    parent_uid_map: dict[str, Any],
+    parent_gid_map: dict[str, Any],
+    container_uid: int,
+    container_gid: int,
+    launching_uid: int,
+    launching_gid: int,
+    parent_relationship_established: bool,
+) -> dict[str, Any]:
+    """Fallback: compose child and parent maps only with proven parent linkage."""
+    if not parent_relationship_established:
+        return {
+            "status": "NOT_TESTED",
+            "reason": "parent_namespace_relationship_not_established",
+            "attributed": False,
+        }
+    uid_comp = compose_nested_id_translation(
+        child_map=child_uid_map, parent_map=parent_uid_map, inside_id=container_uid
+    )
+    gid_comp = compose_nested_id_translation(
+        child_map=child_gid_map, parent_map=parent_gid_map, inside_id=container_gid
+    )
+    uid_ok = bool(uid_comp.get("ok")) and int(uid_comp.get("host_id", -1)) == launching_uid
+    gid_ok = bool(gid_comp.get("ok")) and int(gid_comp.get("host_id", -1)) == launching_gid
+    if not uid_ok or not gid_ok:
+        return {
+            "status": "FAIL",
+            "reason": "composed_nested_maps_do_not_match_launching_identity",
+            "attributed": False,
+            "uid_ok": uid_ok,
+            "gid_ok": gid_ok,
+            "uid_composition": uid_comp,
+            "gid_composition": gid_comp,
+        }
+    return {
+        "status": "PASS",
+        "reason": "composed_nested_maps_cover_launching_uid_and_gid",
+        "attributed": True,
+        "uid_ok": True,
+        "gid_ok": True,
+        "uid_composition": uid_comp,
+        "gid_composition": gid_comp,
+    }
 
 
 def id_maps_cover_identity(
@@ -939,55 +1123,44 @@ def id_maps_cover_identity(
     host_uid: int,
     host_gid: int,
 ) -> dict[str, Any]:
-    """Check that maps translate the effective container IDs to the host identity."""
+    """Deprecated B2 entrypoint: refuses in-container maps as host proof.
 
-    def covers(mapping: dict[str, Any], container_id: int, host_id: int) -> bool:
-        if not mapping.get("ok"):
-            return False
-        for row in mapping.get("rows") or []:
-            start = int(row["container_id"])
-            length = int(row["length"])
-            host_start = int(row["host_id"])
-            if start <= container_id < start + length:
-                return host_start + (container_id - start) == host_id
-        return False
-
-    if not uid_map.get("ok") or not gid_map.get("ok"):
-        return {
-            "status": "NOT_TESTED",
-            "reason": "uid_map_or_gid_map_unavailable",
-            "attributed": False,
-        }
-    uid_ok = covers(uid_map, container_uid, host_uid)
-    gid_ok = covers(gid_map, container_gid, host_gid)
-    if not uid_ok or not gid_ok:
+    Prefer ``host_side_maps_cover_launching_identity`` or nested composition.
+    """
+    if uid_map.get("reader_context") == "in_container" or gid_map.get("reader_context") == "in_container":
         return {
             "status": "FAIL",
-            "reason": "id_map_does_not_match_host_identity",
+            "reason": "in_container_map_cannot_prove_launching_host_identity",
             "attributed": False,
-            "uid_ok": uid_ok,
-            "gid_ok": gid_ok,
         }
-    return {
-        "status": "PASS",
-        "reason": "uid_map_and_gid_map_cover_host_identity",
-        "attributed": True,
-        "uid_ok": True,
-        "gid_ok": True,
-    }
+    # If caller forgot to tag context, do not treat second column as host ID.
+    if uid_map.get("reader_context") != "launching_host" or gid_map.get("reader_context") != "launching_host":
+        return {
+            "status": "NOT_TESTED",
+            "reason": "ambiguous_map_reader_context",
+            "attributed": False,
+        }
+    return host_side_maps_cover_launching_identity(
+        uid_map,
+        gid_map,
+        container_uid=container_uid,
+        container_gid=container_gid,
+        launching_uid=host_uid,
+        launching_gid=host_gid,
+    )
 
 
 def userns_keep_id_attributed(evidence: dict[str, Any]) -> dict[str, Any]:
-    """Evaluate keep-id consistency from runtime observations (not inspect booleans)."""
+    """Evaluate keep-id using host-relative mapping evidence (not inspect booleans)."""
     required = (
         "container_uid",
         "container_gid",
         "host_uid",
         "host_gid",
-        "uid_map",
-        "gid_map",
         "workspace_owner_uid",
+        "workspace_owner_gid",
         "marker_owner_uid",
+        "marker_owner_gid",
     )
     missing = [k for k in required if evidence.get(k) is None]
     if missing:
@@ -1001,8 +1174,10 @@ def userns_keep_id_attributed(evidence: dict[str, Any]) -> dict[str, Any]:
         container_gid = int(evidence["container_gid"])
         host_uid = int(evidence["host_uid"])
         host_gid = int(evidence["host_gid"])
-        workspace_owner = int(evidence["workspace_owner_uid"])
-        marker_owner = int(evidence["marker_owner_uid"])
+        workspace_owner_uid = int(evidence["workspace_owner_uid"])
+        workspace_owner_gid = int(evidence["workspace_owner_gid"])
+        marker_owner_uid = int(evidence["marker_owner_uid"])
+        marker_owner_gid = int(evidence["marker_owner_gid"])
     except (TypeError, ValueError):
         return {
             "status": "NOT_TESTED",
@@ -1017,28 +1192,90 @@ def userns_keep_id_attributed(evidence: dict[str, Any]) -> dict[str, Any]:
             "reason": "container_euid_egid_do_not_match_host_identity",
             "attributed": False,
         }
-    if workspace_owner != host_uid or marker_owner != host_uid:
+    if workspace_owner_uid != host_uid or workspace_owner_gid != host_gid:
         return {
             "status": "FAIL",
-            "reason": "workspace_or_marker_owner_mismatch",
+            "reason": "workspace_owner_uid_or_gid_mismatch",
+            "attributed": False,
+        }
+    if marker_owner_uid != host_uid or marker_owner_gid != host_gid:
+        return {
+            "status": "FAIL",
+            "reason": "marker_owner_uid_or_gid_mismatch",
             "attributed": False,
         }
 
-    map_verdict = id_maps_cover_identity(
-        evidence.get("uid_map") or {},
-        evidence.get("gid_map") or {},
-        container_uid=container_uid,
-        container_gid=container_gid,
-        host_uid=host_uid,
-        host_gid=host_gid,
-    )
-    if map_verdict.get("status") != "PASS":
-        return map_verdict
+    # In-container map text alone must never PASS.
+    if evidence.get("accept_in_container_maps_alone"):
+        return {
+            "status": "FAIL",
+            "reason": "in_container_maps_alone_forbidden",
+            "attributed": False,
+        }
+
+    pid_link = evidence.get("pid_link") or {}
+    if evidence.get("require_pid_link", True):
+        if not pid_link.get("ok"):
+            return {
+                "status": pid_link.get("status") or "NOT_TESTED",
+                "reason": pid_link.get("error") or "container_pid_link_unavailable",
+                "attributed": False,
+                "pid_link": pid_link,
+            }
+
+    host_uid_map = evidence.get("host_side_uid_map") or evidence.get("uid_map") or {}
+    host_gid_map = evidence.get("host_side_gid_map") or evidence.get("gid_map") or {}
+
+    # Preferred path: maps sampled from launching host against the live PID.
+    if host_uid_map.get("reader_context") == "launching_host":
+        map_verdict = host_side_maps_cover_launching_identity(
+            host_uid_map,
+            host_gid_map,
+            container_uid=container_uid,
+            container_gid=container_gid,
+            launching_uid=host_uid,
+            launching_gid=host_gid,
+        )
+        if map_verdict.get("status") != "PASS":
+            return map_verdict
+        return {
+            "status": "PASS",
+            "reason": "keep_id_host_side_maps_and_ownership_consistent",
+            "attributed": True,
+            "map_verdict": map_verdict,
+            "evidence_path": "host_side_procfs",
+        }
+
+    # Fallback: composed nested maps with proven parent relationship.
+    if evidence.get("nested_composition"):
+        nested = evidence["nested_composition"]
+        map_verdict = nested_maps_cover_launching_identity(
+            child_uid_map=nested.get("child_uid_map") or {},
+            child_gid_map=nested.get("child_gid_map") or {},
+            parent_uid_map=nested.get("parent_uid_map") or {},
+            parent_gid_map=nested.get("parent_gid_map") or {},
+            container_uid=container_uid,
+            container_gid=container_gid,
+            launching_uid=host_uid,
+            launching_gid=host_gid,
+            parent_relationship_established=bool(
+                nested.get("parent_relationship_established")
+            ),
+        )
+        if map_verdict.get("status") != "PASS":
+            return map_verdict
+        return {
+            "status": "PASS",
+            "reason": "keep_id_nested_composition_and_ownership_consistent",
+            "attributed": True,
+            "map_verdict": map_verdict,
+            "evidence_path": "nested_composition",
+        }
+
     return {
-        "status": "PASS",
-        "reason": "keep_id_identity_and_maps_consistent",
-        "attributed": True,
-        "map_verdict": map_verdict,
+        "status": "NOT_TESTED",
+        "reason": "no_host_relative_mapping_evidence",
+        "attributed": False,
     }
 
 
@@ -1620,22 +1857,175 @@ def self_check() -> None:
         assert caps_missing["ok"] is False
         assert capability_drop_all_attributed(caps_missing)["status"] == "NOT_TESTED"
 
-        uid_map = parse_id_map("0 100000 1000\n1000 1000 1\n1001 101001 64535\n")
-        gid_map = parse_id_map("0 100000 1000\n1001 1001 1\n1002 101002 64534\n")
-        assert uid_map["ok"] and gid_map["ok"]
+        # Single-stage host-side mapping (reader = launching host).
+        host_uid_map = parse_id_map("0 100000 1000\n1000 1000 1\n1001 1001 64536\n")
+        host_gid_map = parse_id_map("0 100000 1000\n1001 1001 1\n1002 1002 64534\n")
+        assert host_uid_map["ok"] and host_gid_map["ok"]
+        host_uid_map["reader_context"] = "launching_host"
+        host_gid_map["reader_context"] = "launching_host"
         userns_ok = userns_keep_id_attributed(
             {
                 "container_uid": 1000,
                 "container_gid": 1001,
                 "host_uid": 1000,
                 "host_gid": 1001,
-                "uid_map": uid_map,
-                "gid_map": gid_map,
+                "host_side_uid_map": host_uid_map,
+                "host_side_gid_map": host_gid_map,
                 "workspace_owner_uid": 1000,
+                "workspace_owner_gid": 1001,
                 "marker_owner_uid": 1000,
+                "marker_owner_gid": 1001,
+                "pid_link": {"ok": True},
+                "require_pid_link": True,
             }
         )
         assert userns_ok["status"] == "PASS"
+
+        # Nested composition: container 1000 -> parent 0 -> host 1000.
+        child_uid = parse_id_map("0 1 1000\n1000 0 1\n1001 1001 64536\n")
+        parent_uid = parse_id_map("0 1000 1\n1 1 64535\n")
+        child_gid = parse_id_map("0 1 1001\n1001 0 1\n1002 1002 64534\n")
+        parent_gid = parse_id_map("0 1001 1\n1 1 64535\n")
+        nested_ok = userns_keep_id_attributed(
+            {
+                "container_uid": 1000,
+                "container_gid": 1001,
+                "host_uid": 1000,
+                "host_gid": 1001,
+                "workspace_owner_uid": 1000,
+                "workspace_owner_gid": 1001,
+                "marker_owner_uid": 1000,
+                "marker_owner_gid": 1001,
+                "pid_link": {"ok": True},
+                "nested_composition": {
+                    "child_uid_map": child_uid,
+                    "child_gid_map": child_gid,
+                    "parent_uid_map": parent_uid,
+                    "parent_gid_map": parent_gid,
+                    "parent_relationship_established": True,
+                },
+            }
+        )
+        assert nested_ok["status"] == "PASS"
+        nested_bad_parent = nested_maps_cover_launching_identity(
+            child_uid_map=child_uid,
+            child_gid_map=child_gid,
+            parent_uid_map=parse_id_map("0 9999 1\n"),
+            parent_gid_map=parent_gid,
+            container_uid=1000,
+            container_gid=1001,
+            launching_uid=1000,
+            launching_gid=1001,
+            parent_relationship_established=True,
+        )
+        assert nested_bad_parent["status"] == "FAIL"
+        nested_no_rel = nested_maps_cover_launching_identity(
+            child_uid_map=child_uid,
+            child_gid_map=child_gid,
+            parent_uid_map=parent_uid,
+            parent_gid_map=parent_gid,
+            container_uid=1000,
+            container_gid=1001,
+            launching_uid=1000,
+            launching_gid=1001,
+            parent_relationship_established=False,
+        )
+        assert nested_no_rel["status"] == "NOT_TESTED"
+
+        # In-container map text alone must never PASS (B2 false-negative pattern).
+        in_ctr = parse_id_map("1000 0 1\n")
+        in_ctr["reader_context"] = "in_container"
+        alone = userns_keep_id_attributed(
+            {
+                "container_uid": 1000,
+                "container_gid": 1001,
+                "host_uid": 1000,
+                "host_gid": 1001,
+                "uid_map": in_ctr,
+                "gid_map": in_ctr,
+                "workspace_owner_uid": 1000,
+                "workspace_owner_gid": 1001,
+                "marker_owner_uid": 1000,
+                "marker_owner_gid": 1001,
+                "pid_link": {"ok": True},
+                "accept_in_container_maps_alone": True,
+            }
+        )
+        assert alone["status"] == "FAIL"
+        assert (
+            id_maps_cover_identity(
+                in_ctr,
+                in_ctr,
+                container_uid=1000,
+                container_gid=1001,
+                host_uid=1000,
+                host_gid=1001,
+            )["status"]
+            == "FAIL"
+        )
+
+        # Wrong host-side UID translation.
+        bad_host_uid = parse_id_map("1000 42 1\n")
+        bad_host_uid["reader_context"] = "launching_host"
+        bad_host_gid = parse_id_map("1001 1001 1\n")
+        bad_host_gid["reader_context"] = "launching_host"
+        userns_bad_map = userns_keep_id_attributed(
+            {
+                "container_uid": 1000,
+                "container_gid": 1001,
+                "host_uid": 1000,
+                "host_gid": 1001,
+                "host_side_uid_map": bad_host_uid,
+                "host_side_gid_map": bad_host_gid,
+                "workspace_owner_uid": 1000,
+                "workspace_owner_gid": 1001,
+                "marker_owner_uid": 1000,
+                "marker_owner_gid": 1001,
+                "pid_link": {"ok": True},
+            }
+        )
+        assert userns_bad_map["status"] == "FAIL"
+
+        # Incorrect marker GID.
+        userns_bad_marker_gid = userns_keep_id_attributed(
+            {
+                "container_uid": 1000,
+                "container_gid": 1001,
+                "host_uid": 1000,
+                "host_gid": 1001,
+                "host_side_uid_map": host_uid_map,
+                "host_side_gid_map": host_gid_map,
+                "workspace_owner_uid": 1000,
+                "workspace_owner_gid": 1001,
+                "marker_owner_uid": 1000,
+                "marker_owner_gid": 9999,
+                "pid_link": {"ok": True},
+            }
+        )
+        assert userns_bad_marker_gid["status"] == "FAIL"
+
+        # Missing PID link / unmapped / malformed / overlapping.
+        userns_missing_pid = userns_keep_id_attributed(
+            {
+                "container_uid": 1000,
+                "container_gid": 1001,
+                "host_uid": 1000,
+                "host_gid": 1001,
+                "host_side_uid_map": host_uid_map,
+                "host_side_gid_map": host_gid_map,
+                "workspace_owner_uid": 1000,
+                "workspace_owner_gid": 1001,
+                "marker_owner_uid": 1000,
+                "marker_owner_gid": 1001,
+                "pid_link": {"ok": False, "error": "missing_pid"},
+            }
+        )
+        assert userns_missing_pid["status"] == "NOT_TESTED"
+        assert translate_id_through_map(host_uid_map, 999999)["ok"] is False
+        assert parse_id_map("")["ok"] is False
+        assert parse_id_map("0 1 0\n")["ok"] is False
+        assert parse_id_map("0 1 10\n5 2 10\n")["ok"] is False
+        assert parse_id_map("not a map")["ok"] is False
 
         userns_bad_uid = userns_keep_id_attributed(
             {
@@ -1643,10 +2033,13 @@ def self_check() -> None:
                 "container_gid": 1001,
                 "host_uid": 1000,
                 "host_gid": 1001,
-                "uid_map": uid_map,
-                "gid_map": gid_map,
+                "host_side_uid_map": host_uid_map,
+                "host_side_gid_map": host_gid_map,
                 "workspace_owner_uid": 1000,
+                "workspace_owner_gid": 1001,
                 "marker_owner_uid": 1000,
+                "marker_owner_gid": 1001,
+                "pid_link": {"ok": True},
             }
         )
         assert userns_bad_uid["status"] == "FAIL"
@@ -1654,10 +2047,9 @@ def self_check() -> None:
         userns_missing = userns_keep_id_attributed({"container_uid": 1000})
         assert userns_missing["status"] == "NOT_TESTED"
 
-        assert parse_id_map("")["ok"] is False
         assert id_maps_cover_identity(
             {"ok": False},
-            gid_map,
+            host_gid_map,
             container_uid=1000,
             container_gid=1001,
             host_uid=1000,
