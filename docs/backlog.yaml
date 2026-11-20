@@ -85,7 +85,7 @@ tasks:
   - id: M03-00
     milestone: M03
     title: Sandbox design and isolation boundaries
-    status: READY
+    status: PASS
     depends_on:
       - M00-02
       - M01-00
