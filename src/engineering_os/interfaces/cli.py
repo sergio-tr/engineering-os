@@ -410,14 +410,63 @@ def cmd_runtime(args: argparse.Namespace) -> int:
 
 
 def cmd_sandbox(args: argparse.Namespace) -> int:
+    cmd = args.sandbox_cmd
+    if cmd == "demo-fixture":
+        import tempfile
+
+        path = Path(args.db) if args.db else default_db_path()
+        if getattr(args, "temp", False):
+            path = Path(tempfile.mkdtemp(prefix="eos-oci-")) / "demo.sqlite3"
+        plane = ControlPlane.open(path)
+        try:
+            result = plane.run_sandbox_fixture_demo()
+            result["db_path"] = str(path)
+            _print(result)
+            return 0
+        finally:
+            plane.close()
+
     plane = _plane(args.db)
     try:
-        if args.sandbox_cmd == "readiness":
+        if cmd == "readiness":
             _print(plane.sandbox_readiness())
             return 0
-        if args.sandbox_cmd == "plan":
+        if cmd == "plan":
             _print(plane.sandbox_plan(args.execution_id))
             return 0
+        if cmd == "fixture-readiness":
+            _print(plane.sandbox_fixture_readiness())
+            return 0
+        if cmd == "fixture-plan":
+            _print(
+                plane.sandbox_fixture_plan(
+                    execution_id=getattr(args, "execution_id", None),
+                    image_ref=getattr(args, "image_ref", "localhost/alpine:eos-fixture"),
+                )
+            )
+            return 0
+        if cmd == "fixture-history":
+            _print(plane.sandbox_fixture_history(getattr(args, "project_id", None)))
+            return 0
+        if cmd == "run-acp-fixture":
+            execute = bool(getattr(args, "execute", False))
+            allow_phase_b = bool(getattr(args, "allow_phase_b", False))
+            owner_auth = bool(getattr(args, "owner_authorize_runtime_execution", False))
+            dry_run = bool(getattr(args, "dry_run", False)) or not execute
+            try:
+                _print(
+                    plane.run_oci_acp_fixture(
+                        execute=execute,
+                        allow_phase_b=allow_phase_b,
+                        owner_authorize_runtime_execution=owner_auth,
+                        dry_run=dry_run,
+                    )
+                )
+                return 0
+            except Exception as exc:  # noqa: BLE001
+                # OwnerGateError and PolicyError surface as structured failure.
+                _print({"ok": False, "error": str(exc), "code": getattr(exc, "code", None)})
+                return 2
         return 2
     finally:
         plane.close()
@@ -858,12 +907,37 @@ def build_parser() -> argparse.ArgumentParser:
     c = rs.add_parser("inspect")
     c.set_defaults(func=cmd_runtime)
 
-    p = sub.add_parser("sandbox", help="Sandbox launcher readiness (EOS-07)")
+    p = sub.add_parser("sandbox", help="Sandbox launcher / OCI fixture (EOS-07/08)")
     ss = p.add_subparsers(dest="sandbox_cmd", required=True)
     c = ss.add_parser("readiness")
     c.set_defaults(func=cmd_sandbox)
     c = ss.add_parser("plan")
     c.add_argument("--execution-id", required=True)
+    c.set_defaults(func=cmd_sandbox)
+    c = ss.add_parser("fixture-readiness", help="OCI ACP fixture readiness")
+    c.set_defaults(func=cmd_sandbox)
+    c = ss.add_parser("fixture-plan", help="Plan OCI ACP fixture argv")
+    c.add_argument("--execution-id", default=None)
+    c.add_argument("--image-ref", default="localhost/alpine:eos-fixture")
+    c.set_defaults(func=cmd_sandbox)
+    c = ss.add_parser("fixture-history")
+    c.add_argument("--project-id", default=None)
+    c.set_defaults(func=cmd_sandbox)
+    c = ss.add_parser(
+        "run-acp-fixture",
+        help="Dry-run or Owner-gated OCI ACP fixture (not exposed via HTTP)",
+    )
+    c.add_argument("--dry-run", action="store_true", default=False)
+    c.add_argument("--execute", action="store_true", default=False)
+    c.add_argument("--allow-phase-b", action="store_true", default=False)
+    c.add_argument(
+        "--owner-authorize-runtime-execution",
+        action="store_true",
+        default=False,
+    )
+    c.set_defaults(func=cmd_sandbox)
+    c = ss.add_parser("demo-fixture", help="Offline injected OCI ACP fixture demo")
+    c.add_argument("--temp", action="store_true")
     c.set_defaults(func=cmd_sandbox)
 
     p = sub.add_parser("acpx", help="ACPX sandbox bridge (EOS-07)")
