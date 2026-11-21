@@ -82,7 +82,9 @@ class WorkspacePreparer:
     def readiness(self) -> Dict[str, Any]:
         return {
             "status": "READY",
+            "ok": True,
             "root": str(self.root),
+            "size_limit_bytes": 64 * 1024 * 1024,
             "cross_project_mounts": False,
             "host_home_access": False,
             "github_credential_mounts": False,

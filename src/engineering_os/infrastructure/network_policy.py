@@ -107,8 +107,21 @@ class FixtureAllowlistNetworkPolicy(NetworkPolicy):
         }
 
     def evaluate(self, destination: str) -> NetworkDecision:
-        host = destination.lower().split("/")[0].split(":")[0]
-        if host in self.allowed:
+        from engineering_os.infrastructure.egress_enforcer import is_ip_literal
+
+        host = destination.lower().split("/")[0]
+        if "://" in host:
+            host = host.split("://", 1)[1]
+        host = host.split("@")[-1]
+        host_only = host.split(":")[0].strip("[]")
+        if is_ip_literal(host_only):
+            return NetworkDecision(
+                allowed=False,
+                destination=destination,
+                reason="ip_literal_bypass_denied",
+                policy_id=self.policy_id,
+            )
+        if host_only in self.allowed or host in self.allowed:
             return NetworkDecision(
                 allowed=True,
                 destination=destination,

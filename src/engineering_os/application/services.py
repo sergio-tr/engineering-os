@@ -65,11 +65,15 @@ from engineering_os.infrastructure.credential_provider import (
     FixtureCursorCredentialProvider,
     UnavailableCursorCredentialProvider,
 )
-from engineering_os.infrastructure.cursor_bridge import CursorBridge
+from engineering_os.infrastructure.cursor_bridge import CursorBridge, RUNTIME_MODES
 from engineering_os.infrastructure.cursor_runtime import CursorRuntimePlanner
 from engineering_os.infrastructure.network_policy import (
     FixtureAllowlistNetworkPolicy,
     UnenforcedNetworkPolicy,
+)
+from engineering_os.infrastructure.runtime_authorization import (
+    RuntimeAuthorization,
+    RuntimeAuthorizationVerifier,
 )
 from engineering_os.infrastructure.workspace_prep import WorkspacePreparer
 from engineering_os.infrastructure.gateway_client import (
@@ -95,9 +99,6 @@ from engineering_os.infrastructure.paperclip_client import (
     DEFAULT_PAPERCLIP_URL,
     PaperclipClient,
     PaperclipClientError,
-)
-from engineering_os.infrastructure.runtime_authorization import (
-    RuntimeAuthorizationVerifier,
 )
 from engineering_os.infrastructure.sandbox_launcher import PodmanAcpSandboxLauncher
 from engineering_os.infrastructure.sqlite_repo import Repository, default_db_path
@@ -2115,27 +2116,72 @@ class ControlPlane:
             transport_type=transport.name,
             correlation_id=execution.idempotency_key,
         )
+        protocol_completed = False
         try:
             session = manager.run_to_completion(
                 session,
                 prompt_text="EOS-08 OCI ACP fixture prompt",
                 mode="SYNTHETIC",
             )
+            protocol_completed = session.get("status") == "COMPLETED"
+            transport.mark_protocol_completed(protocol_completed)
         finally:
-            cleanup = handle.cleanup()
+            # Graceful lifecycle: EOF/stdin → SIGTERM → SIGKILL only as fallback.
+            cleanup = handle.cleanup(grace_seconds=2.0)
             result = handle.wait(timeout=1.0)
+            transport.mark_protocol_completed(protocol_completed)
+            if not transport.close_outcome():
+                # Mirror close accounting when session manager did not close yet.
+                transport.protocol_completed = protocol_completed
+                transport.exit_code = cleanup.get("exit_code", result.returncode)
+                transport.process_exited_cleanly = bool(
+                    cleanup.get("process_exited_cleanly", result.process_exited_cleanly)
+                )
+                transport.termination_reason = cleanup.get(
+                    "termination_reason", result.termination_reason
+                )
+                transport.cleanup_verified = bool(
+                    cleanup.get("cleanup_verified", cleanup.get("cleaned_up"))
+                )
+
+        protocol_completed = session.get("status") == "COMPLETED"
+        process_exited_cleanly = bool(
+            cleanup.get("process_exited_cleanly", result.process_exited_cleanly)
+        )
+        termination_reason = cleanup.get(
+            "termination_reason", result.termination_reason
+        )
+        cleanup_verified = bool(
+            cleanup.get("cleanup_verified", cleanup.get("cleaned_up"))
+        )
+        exit_code = cleanup.get("exit_code", result.returncode)
 
         run["acp_session_id"] = session["session_id"]
-        run["exit_code"] = result.returncode
+        run["exit_code"] = exit_code
         run["timeout_or_cancel"] = (
             "timeout" if result.timed_out else ("cancelled" if result.cancelled else None)
         )
-        run["exchange_summary"] = transport.summary()
+        run["exchange_summary"] = {
+            **transport.summary(),
+            "protocol_completed": protocol_completed,
+            "process_exited_cleanly": process_exited_cleanly,
+            "termination_reason": termination_reason,
+            "cleanup_verified": cleanup_verified,
+            "exit_code": exit_code,
+        }
         run["cleanup_status"] = "ok" if cleanup.get("cleaned_up") else "failed"
         run["host_observations"] = {
             **run["host_observations"],
             "cleanup": cleanup,
             "stderr_bytes": len(handle.stderr_text.encode("utf-8")),
+            "lifecycle": {
+                "protocol_completed": protocol_completed,
+                "process_exited_cleanly": process_exited_cleanly,
+                "exit_code": exit_code,
+                "termination_reason": termination_reason,
+                "cleanup_verified": cleanup_verified,
+                "sigkill_used": bool(cleanup.get("sigkill_used")),
+            },
         }
         evidence = list(session.get("evidence_refs") or []) + [
             f"oci-run:{run['run_id']}",
@@ -2146,8 +2192,14 @@ class ControlPlane:
             "exchange": sha256_text(str(transport.summary())),
             "controls": sha256_text(str(run["runtime_controls"])),
         }
-        if session["status"] == "COMPLETED" and run["cleanup_status"] == "ok":
+        # Protocol success is independent of clean process exit (EOS-08 exit -9 fix).
+        if protocol_completed and run["cleanup_status"] == "ok":
             run["status"] = "COMPLETED"
+            if not process_exited_cleanly:
+                run["failure_reason"] = None
+                run["host_observations"]["lifecycle_note"] = (
+                    "protocol_completed_with_nonclean_process_exit"
+                )
         else:
             run["status"] = "FAILED"
             run["failure_reason"] = session.get("failure_reason") or run["timeout_or_cancel"]
@@ -2257,15 +2309,21 @@ class ControlPlane:
             "note": "Injected OCI process only; no Podman/containers started",
         }
 
-    # --- EOS-09 Cursor runtime ---
+    # --- EOS-09/10 Cursor runtime ---
     def cursor_status(self) -> Dict[str, Any]:
         return self.cursor.status()
 
     def cursor_image_plan(self) -> Dict[str, Any]:
-        return self.cursor.runtime.image_plan()
+        return self.cursor.image_build_plan()
+
+    def cursor_image_inspect(self) -> Dict[str, Any]:
+        return self.cursor.image_inspect()
+
+    def cursor_image_verify(self, **kwargs: Any) -> Dict[str, Any]:
+        return self.cursor.image_verify(**kwargs)
 
     def cursor_readiness(self) -> Dict[str, Any]:
-        return self.cursor.runtime.readiness().to_dict()
+        return self.cursor.preflight()
 
     def runtime_requirements(self) -> Dict[str, Any]:
         return self.cursor.requirements()
@@ -2298,6 +2356,12 @@ class ControlPlane:
             correlation_id=execution.idempotency_key,
         )
 
+    def cursor_sessions(self, project_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        return self.cursor.list_sessions(project_id=project_id)
+
+    def cursor_evidence(self, execution_id: str) -> Dict[str, Any]:
+        return self.cursor.evidence_for(execution_id)
+
     def prepare_cursor_task(self, task_id: str) -> Dict[str, Any]:
         execution = self.prepare_synthetic_execution(task_id)
         prepared = self.cursor.prepare_session(
@@ -2323,8 +2387,57 @@ class ControlPlane:
             "live_cursor_acp": False,
         }
 
+    def cursor_smoke(
+        self,
+        *,
+        dry_run: bool = True,
+        execute: bool = False,
+        allow_phase_b: bool = False,
+        owner_authorize_runtime_execution: bool = False,
+        authorization: Optional[RuntimeAuthorization] = None,
+    ) -> Dict[str, Any]:
+        """Owner smoke workflow. Live path requires triple-gate + SANDBOX PASS + auth."""
+        project = self.create_project("Cursor Smoke", "local/cursor-smoke")
+        goal = self.create_goal(project.project_id, "Cursor ACP smoke readiness")
+        task = self.create_task(goal.goal_id, "Trivial read-only Cursor smoke")
+        self.approve_goal(goal.goal_id)
+        execution = self.prepare_synthetic_execution(task.task_id)
+        ws = self.cursor.workspace.prepare(
+            execution_id=execution.execution_id, project_id=project.project_id
+        )
+        if dry_run or not execute:
+            result = self.cursor.smoke_dry_run(
+                execution_id=execution.execution_id,
+                project_id=project.project_id,
+                task_id=task.task_id,
+                workspace_id=ws.workspace_id,
+                workspace_host_path=ws.host_path,
+            )
+            result["execution_id"] = execution.execution_id
+            result["project_id"] = project.project_id
+            result["owner_path"] = "dry_run"
+            return result
+        result = self.cursor.smoke_execute(
+            execution_id=execution.execution_id,
+            project_id=project.project_id,
+            task_id=task.task_id,
+            workspace_id=ws.workspace_id,
+            workspace_host_path=ws.host_path,
+            authorization=authorization,
+            execute=execute,
+            allow_phase_b=allow_phase_b,
+            owner_authorize_runtime_execution=owner_authorize_runtime_execution,
+            dry_run=False,
+        )
+        result["execution_id"] = execution.execution_id
+        result["project_id"] = project.project_id
+        return result
+
     def run_cursor_fixture_demo(self) -> Dict[str, Any]:
         """Offline Cursor integration demo with fixture credentials/network."""
+        verifier = RuntimeAuthorizationVerifier(
+            secret=b"eos10-fixture-secret", issuance_enabled=True
+        )
         self.cursor = CursorBridge(
             self.repo,
             credentials=FixtureCursorCredentialProvider(),
@@ -2336,6 +2449,7 @@ class ControlPlane:
                 cursor_version="fixture-0.0.0",
                 available_binaries=["agent", "cursor-agent"],
             ),
+            auth_verifier=verifier,
             sandbox_gate=self.sandbox_gate,
         )
         project = self.create_project("Cursor Runtime Demo", "local/cursor-demo")
@@ -2347,9 +2461,18 @@ class ControlPlane:
         self.approve_goal(goal.goal_id)
         prepared = self.prepare_cursor_task(t1.task_id)
         demo = self.cursor.run_demo_synthetic(prepared["prepared"]["preparation"])
-        # Live remains blocked
+        smoke = self.cursor.smoke_dry_run(
+            execution_id=prepared["execution"]["execution_id"],
+            project_id=project.project_id,
+            task_id=t1.task_id,
+            workspace_id=prepared["prepared"]["preparation"]["sandbox_identity"],
+            workspace_host_path=prepared["prepared"]["preparation"]["workspace_json"][
+                "host_path"
+            ],
+        )
         reqs = self.runtime_requirements()
         denied = self.cursor.network.evaluate("evil.example")
+        ip_denied = self.cursor.network.evaluate("1.2.3.4")
         return {
             "mode": "CURSOR_FIXTURE_OFFLINE",
             "project_id": project.project_id,
@@ -2357,11 +2480,107 @@ class ControlPlane:
             "task2_id": t2.task_id,
             "prepared": prepared,
             "demo": demo,
+            "smoke_dry_run": smoke,
             "requirements": reqs,
             "unauthorized_egress_denied": denied.to_dict(),
+            "ip_literal_denied": ip_denied.to_dict(),
             "integration_check": self.cursor_integration_check(),
+            "runtime_modes": list(RUNTIME_MODES),
+            "preflight": self.cursor.preflight(),
             "live_cursor_acp": False,
             "note": "No Cursor/OpenClaw/containers/network/credentials used",
+        }
+
+    def owner_deployment_sequence(self) -> Dict[str, Any]:
+        """Exact Owner-operated sequence for real environment preparation."""
+        return {
+            "live_cursor_acp": False,
+            "sandbox_gate": self.sandbox_gate,
+            "steps": [
+                {
+                    "step": 1,
+                    "title": "Build Cursor image",
+                    "commands": [
+                        "python3 scripts/eos.py cursor image build-plan",
+                        "podman pull docker.io/library/debian:bookworm-slim",
+                        "podman image inspect --format '{{.Digest}}' docker.io/library/debian:bookworm-slim",
+                        "# Install Cursor CLI per https://cursor.com/install into containers/cursor-acp/vendor/",
+                        "sha256sum containers/cursor-acp/vendor/cursor-agent",
+                        "agent --version  # or ./vendor/cursor-agent --version",
+                        "podman build --build-arg BASE_IMAGE=debian@sha256:<BASE_DIGEST> "
+                        "-t localhost/eos-cursor-acp-runtime:eos10 "
+                        "-f containers/cursor-acp/Containerfile containers/cursor-acp",
+                        "podman image inspect --format '{{.Id}} {{.Digest}}' "
+                        "localhost/eos-cursor-acp-runtime:eos10",
+                    ],
+                },
+                {
+                    "step": 2,
+                    "title": "Verify image identity",
+                    "commands": [
+                        "python3 scripts/eos.py cursor image inspect",
+                        "python3 scripts/eos.py cursor image verify --write-evidence "
+                        "--image-digest sha256:<DIGEST> --cursor-version <VER> "
+                        "--artifact-checksum sha256:<BIN_SHA> --base-digest sha256:<BASE>",
+                    ],
+                },
+                {
+                    "step": 3,
+                    "title": "Configure credential delivery",
+                    "commands": [
+                        "install -m 600 /dev/null \"$HOME/.config/eos/cursor_api_key\"",
+                        "# Place CURSOR_API_KEY value in that file (Owner only)",
+                        "export EOS_CURSOR_API_KEY_FILE=\"$HOME/.config/eos/cursor_api_key\"",
+                        "# Enable OwnerEnvFileCredentialProvider in control-plane config (disabled by default)",
+                    ],
+                },
+                {
+                    "step": 4,
+                    "title": "Configure and verify egress enforcement",
+                    "commands": [
+                        "sudo apt-get install -y passt  # provides pasta for rootless Podman",
+                        "podman network create eos-cursor-egress",
+                        "python3 scripts/eos.py cursor readiness",
+                    ],
+                    "blocker_if_missing": "pasta_or_passt_binary",
+                },
+                {
+                    "step": 5,
+                    "title": "Verify storage/resource constraints",
+                    "commands": [
+                        "python3 scripts/eos.py runtime requirements",
+                        "python3 scripts/eos.py cursor readiness",
+                    ],
+                },
+                {
+                    "step": 6,
+                    "title": "Inspect runtime readiness",
+                    "commands": [
+                        "python3 scripts/eos.py cursor readiness",
+                        "python3 scripts/eos.py runtime requirements",
+                    ],
+                },
+                {
+                    "step": 7,
+                    "title": "Harmless sandboxed Cursor binary preflight",
+                    "commands": [
+                        "podman run --rm --network none --read-only "
+                        "--tmpfs /runtime/tmp:rw,size=32m --user 65534:65534 "
+                        "localhost/eos-cursor-acp-runtime:eos10 agent --version",
+                    ],
+                },
+                {
+                    "step": 8,
+                    "title": "Authorized live ACP smoke (only after SANDBOX PASS)",
+                    "commands": [
+                        "python3 scripts/eos.py cursor smoke --dry-run",
+                        "# Requires canonical SANDBOX gate PASS + fresh host authorization:",
+                        "python3 scripts/eos.py cursor smoke --execute --allow-phase-b "
+                        "--owner-authorize-runtime-execution",
+                    ],
+                    "note": "Do not enable via SANDBOX_GATE env alone; UI sandbox_gate never launches",
+                },
+            ],
         }
 
     # --- helpers ---

@@ -147,21 +147,29 @@ The first real workload is a minimal NDJSON ACP fixture (not Cursor). Provenance
 `SYNTHETIC_OCI_EXECUTED` for real Podman runs and `SYNTHETIC_IN_MEMORY` for injected
 tests. `CURSOR_ACP_LIVE` remains unused. HTTP/dashboard never expose real OCI launch.
 
-### Cursor ACP runtime (EOS-09)
+### Cursor ACP runtime (EOS-09/10)
 
 ```bash
 python3 scripts/eos.py cursor demo-fixture --temp
 python3 scripts/eos.py cursor status
-python3 scripts/eos.py cursor image-plan
+python3 scripts/eos.py cursor image inspect
+python3 scripts/eos.py cursor image build-plan
+python3 scripts/eos.py cursor image verify
 python3 scripts/eos.py cursor readiness
-python3 scripts/eos.py cursor integration-check
+python3 scripts/eos.py cursor smoke --dry-run
+python3 scripts/eos.py cursor sessions
+python3 scripts/eos.py cursor deployment-sequence
 python3 scripts/eos.py runtime requirements
 ```
 
-Defines a reproducible Cursor OCI image profile (`containers/cursor-acp/`), credential
-and network fail-closed boundaries, ACPX launcher command proposal, and workspace
-preparation. Live Cursor ACP remains disabled; no image build or credential use in
-automation.
+EOS-10 adds: graceful OCI process lifecycle (protocol vs process outcomes),
+reproducible Owner image build plan/verify, runtime preflight, credential broker
+(disabled by default), pasta allowlist egress enforcer, host runtime authorization
+wiring, smoke dry-run, and orchestrator runtime modes
+(`SYNTHETIC_IN_MEMORY` / `SYNTHETIC_OCI_EXECUTED` / `CURSOR_ACP_LIVE`).
+
+Live Cursor ACP remains disabled until SANDBOX PASS + host auth + Owner triple-gate.
+Automation never builds images, launches containers, or accesses real credentials.
 
 ## Candidate architecture (provisional)
 

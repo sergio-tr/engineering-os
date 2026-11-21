@@ -48,7 +48,6 @@ def resolve_cursor_acp_command(
         if available and binary not in available:
             continue
         if available or not available_binaries:
-            # When availability is unknown (image not built), return first profile candidate.
             return CursorCommandProfile(argv=tuple(str(x) for x in cand), source="image_profile")
     raise RuntimeError("cursor_acp_command_unresolved")
 
@@ -85,14 +84,19 @@ class CursorRuntimePlanner:
         self.available_binaries = list(available_binaries or [])
 
     def image_plan(self) -> Dict[str, Any]:
+        from engineering_os.infrastructure.cursor_image import build_plan
+
+        plan = build_plan()
         return {
             "profile": self.profile,
             "containerfile": self.profile.get("containerfile"),
             "expected_image_ref": self.profile.get("expected_image_ref"),
             "expected_image_digest": self.profile.get("expected_image_digest"),
             "build_authorized_in_eos09": False,
+            "build_authorized_in_automation": False,
             "alpine_fixture_suitable": False,
-            "note": "Image definition only; do not build during EOS-09 automation",
+            "owner_build_plan": plan,
+            "note": "Image definition + Owner build plan; do not build during EOS-10 automation",
         }
 
     def command(self) -> CursorCommandProfile:
@@ -154,10 +158,10 @@ class CursorRuntimePlanner:
                 "detail": "cursor runtime profile distinct from eos08 fixture",
             },
             {
-                "key": "live_execution_disabled",
+                "key": "live_execution_disabled_until_authorized",
                 "ok": True,
                 "status": "OK",
-                "detail": "EOS-09 does not enable live Cursor ACP",
+                "detail": "EOS-10 requires SANDBOX + host auth + Owner triple-gate",
             },
         ]
         missing = [i for i in items if not i["ok"]]

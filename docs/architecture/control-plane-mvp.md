@@ -142,6 +142,25 @@ Preparation path for real Cursor ACP inside the same Podman boundary:
 
 Live Cursor ACP launch remains disabled. SANDBOX is not declared PASS.
 
+## Cursor live readiness (EOS-10)
+
+Operational components required before a controlled Cursor ACP experiment:
+
+- Graceful OCI lifecycle: stdin EOF → SIGTERM → SIGKILL fallback; independent
+  `protocol_completed` vs `process_exited_cleanly` / `termination_reason` /
+  `cleanup_verified` fields (addresses EOS-08 `exit=-9` attribution)
+- Owner image build-plan / inspect / verify with machine-readable evidence
+  (no floating `latest`; no automation builds; Cursor install via documented sources)
+- Read-only WSL2 preflight with STATIC/HOST/RUNTIME/NOT_TESTED/BLOCKED evidence
+- Credential broker: fixture + Owner env-file provider (disabled by default);
+  secrets never in SQLite/argv/logs; env injection does not claim peer isolation
+- Concrete pasta allowlist egress enforcer for rootless Podman (fail closed if missing)
+- Runtime authorization bound to execution/task/workspace/image/command/creds/network
+- Cursor OCI launcher + smoke dry-run; execute path requires SANDBOX PASS + host auth
+  + Owner triple-gate (HTTP never exposes live execute)
+- Orchestrator runtime modes: `SYNTHETIC_IN_MEMORY`, `SYNTHETIC_OCI_EXECUTED`,
+  `CURSOR_ACP_LIVE` (last remains blocked until prerequisites)
+
 ## Assumptions
 
 - Python ≥ 3.10 standard library only (no third-party runtime dependencies)
