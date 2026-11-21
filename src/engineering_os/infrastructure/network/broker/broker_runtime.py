@@ -1,8 +1,9 @@
-"""Per-execution TrustedEgressBroker lifecycle for Owner-operated probes (EOS-12).
+"""Per-execution TrustedEgressBroker lifecycle for Owner-operated probes (EOS-12/12.1).
 
 Completes EOS-11 with startup/shutdown, UDS permissions, quotas, CONNECT
-validation and fail-closed cleanup. Real outbound connects only when
-`connect_fn` is the live connector and Owner gates are asserted upstream.
+tunnel ownership and fail-closed cleanup. Real outbound sockets only when
+`connect_fn` / `open_upstream_fn` is the live connector and Owner gates are
+asserted upstream.
 """
 
 from __future__ import annotations
@@ -11,29 +12,31 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set
 import os
-import socket
 import tempfile
 import threading
 
 from engineering_os.domain.models import new_id, utc_now
 from engineering_os.infrastructure.network.broker.egress_broker import (
     ConnectFn,
+    OpenUpstreamFn,
     ResolveFn,
     TrustedEgressBroker,
     blocked_connect,
+    live_open_upstream,
     write_tcp_uds_relay_script,
 )
 from engineering_os.infrastructure.network.policy.egress_enforcer import DEFAULT_CURSOR_DESTINATIONS
 from engineering_os.infrastructure.evidence import ERROR, SYNTHETIC, UNAVAILABLE
 
 
-def live_connect(host: str, port: int, timeout: float) -> tuple[bool, str]:
-    """Real TCP connect — Owner path only; never used in automated tests."""
-    try:
-        with socket.create_connection((host, port), timeout=timeout):
-            return True, "connected"
-    except OSError as exc:
-        return False, f"connect_failed:{exc}"
+def live_connect(
+    host: str,
+    port: int,
+    timeout: float,
+    resolved_addrs: Optional[List[str]] = None,
+) -> tuple:
+    """Compatibility wrapper — prefer live_open_upstream (connection-owning)."""
+    return live_open_upstream(host, port, timeout, resolved_addrs)
 
 
 @dataclass
@@ -68,19 +71,24 @@ class BrokerRuntime:
     def __init__(
         self,
         *,
-        connect_fn: Optional[ConnectFn] = None,
+        connect_fn: Optional[Callable[..., Any]] = None,
+        open_upstream_fn: Optional[OpenUpstreamFn] = None,
         resolve_fn: Optional[ResolveFn] = None,
         allowed_destinations: Optional[Set[str]] = None,
         max_connections: int = 16,
         connect_timeout_seconds: float = 10.0,
+        tunnel_deadline_seconds: float = 30.0,
+        max_tunnel_bytes: int = 4 * 1024 * 1024,
         max_request_bytes: int = 64 * 1024,
         root: Optional[Path] = None,
     ) -> None:
-        self.connect_fn = connect_fn or blocked_connect
+        self.connect_fn = open_upstream_fn or connect_fn or blocked_connect
         self.resolve_fn = resolve_fn
         self.allowed = set(allowed_destinations or DEFAULT_CURSOR_DESTINATIONS)
         self.max_connections = max_connections
         self.connect_timeout_seconds = connect_timeout_seconds
+        self.tunnel_deadline_seconds = tunnel_deadline_seconds
+        self.max_tunnel_bytes = max_tunnel_bytes
         self.max_request_bytes = max_request_bytes
         self.root = Path(root or (Path(tempfile.gettempdir()) / "eos-egress-brokers"))
         self.root.mkdir(parents=True, exist_ok=True)
@@ -97,6 +105,7 @@ class BrokerRuntime:
                 "max_connections": self.max_connections,
                 "max_request_bytes": self.max_request_bytes,
                 "connect_timeout_seconds": self.connect_timeout_seconds,
+                "tunnel_deadline_seconds": self.tunnel_deadline_seconds,
                 "unrestricted_tcp_forwarder": False,
                 "host_network_fallback": False,
                 "podman_socket_mounted": False,
@@ -111,7 +120,6 @@ class BrokerRuntime:
             broker_id = new_id("broker")
             work = self.root / execution_id
             if work.exists():
-                # Idempotent cleanup of stale dir for same execution id.
                 for child in work.iterdir():
                     if child.is_file():
                         child.unlink(missing_ok=True)
@@ -124,12 +132,13 @@ class BrokerRuntime:
                 resolve_fn=self.resolve_fn,
                 connect_fn=self.connect_fn,
                 connect_timeout_seconds=self.connect_timeout_seconds,
+                tunnel_deadline_seconds=self.tunnel_deadline_seconds,
+                max_tunnel_bytes=self.max_tunnel_bytes,
                 max_connections=self.max_connections,
                 socket_path=str(sock),
             )
             path = broker.start_unix_server(str(sock))
             os.chmod(path, 0o600)
-            # Ensure socket not world-accessible.
             st = os.stat(path)
             if st.st_mode & 0o077:
                 os.chmod(path, 0o600)
@@ -163,7 +172,8 @@ class BrokerRuntime:
                     "evidence_class": UNAVAILABLE,
                 }
             observations = broker.observations()
-            broker.mark_crashed()  # fail-closed for late clients
+            tunnel_stats = broker.tunnel_stats()
+            broker.mark_crashed()
             broker.stop()
             sock_gone = True
             if instance and Path(instance.socket_path).exists():
@@ -171,7 +181,6 @@ class BrokerRuntime:
                     Path(instance.socket_path).unlink()
                 except OSError:
                     sock_gone = False
-            # Remove work dir contents except evidence snapshot.
             cleanup_ok = sock_gone
             if instance:
                 instance.stopped_at = utc_now()
@@ -192,12 +201,13 @@ class BrokerRuntime:
                 "stopped": True,
                 "cleanup_verified": cleanup_ok,
                 "observations": observations,
+                "tunnel_stats": tunnel_stats,
                 "instance": instance.to_dict() if instance else None,
                 "evidence_class": SYNTHETIC if cleanup_ok else ERROR,
             }
 
     def interrupt(self, execution_id: str) -> Dict[str, Any]:
-        """Fail-closed interrupt without full cleanup (probe case 9)."""
+        """Fail-closed interrupt without full cleanup (probe case)."""
         broker = self._active.get(execution_id)
         if not broker:
             return {"interrupted": False, "reason": "not_active"}
@@ -222,7 +232,6 @@ def cursor_proxy_env(*, relay_port: int = 18080) -> Dict[str, str]:
         "NODE_USE_ENV_PROXY": "1",
         "EOS_EGRESS_RELAY_PORT": str(relay_port),
         "EOS_EGRESS_UDS": "/runtime/egress/broker.sock",
-        # Prefer HTTP/1.1 where NODE/undici needs it behind CONNECT proxies.
         "NODE_OPTIONS": "--no-experimental-fetch",
         "CURSOR_DISABLE_AUTO_UPDATE": "1",
     }
