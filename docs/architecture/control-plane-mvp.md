@@ -190,6 +190,20 @@ Operational completion of the EOS-11 design for Owner-operated WSL2:
 
 Live launch remains blocked until prerequisites are demonstrated outside automation.
 
+## Modular packaging (EOS-13)
+
+The control plane is organized as ports-and-adapters:
+
+- `bootstrap.py` is the composition root (`ControlPlaneDependencies`)
+- `ControlPlane` remains a compatibility facade over focused use cases
+- SQLite persistence is split under `infrastructure/persistence/sqlite/`
+- Runtime/integrations live under responsibility packages (`network/`, `runtime/`,
+  `acp/`, `integrations/`, `security/`) with compatibility shims at previous paths
+- HTTP routes and CLI packaging are modularized under `interfaces/http/` and
+  `interfaces/cli/`
+
+See [solid-refactor.md](solid-refactor.md) and `.cursor/rules/architecture.mdc`.
+
 ## Assumptions
 
 - Python ≥ 3.10 standard library only (no third-party runtime dependencies)
