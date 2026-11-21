@@ -174,6 +174,22 @@ Concrete path:
   Owner-gated `eos network probe --execute ...`
 - `eos cursor live-preflight` reports real blockers; never READY from mocks alone
 
+## First real Cursor ACP smoke path (EOS-12)
+
+Operational completion of the EOS-11 design for Owner-operated WSL2:
+
+- `BrokerRuntime`: per-execution broker identity, `0600` UDS, start/stop/interrupt,
+  connection quotas, fail-closed crash
+- `NetworkProbeExecutor`: disposable Podman argv with relay mounts; injected offline
+  path; Owner `--execute` may use real Podman (never via HTTP)
+- Cursor proxy configuration: `HTTP_PROXY`, `HTTPS_PROXY`, `NODE_USE_ENV_PROXY=1`
+  (auth success alone is not proxy proof)
+- `CursorSmokeWorkflow`: read-only README summary prompt; evidence with integrity hash
+- Owner stages A–F via `eos cursor deployment-sequence` (no auto-advance)
+- Orchestrator still treats `CURSOR_ACP_LIVE` as blocked; ACP completion ≠ merged PR
+
+Live launch remains blocked until prerequisites are demonstrated outside automation.
+
 ## Assumptions
 
 - Python ≥ 3.10 standard library only (no third-party runtime dependencies)

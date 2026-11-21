@@ -459,6 +459,7 @@ class SequentialOrchestrator:
         # CURSOR_ACP_LIVE
         reqs = self.plane.runtime_requirements()
         prepared = self.prepare_cursor(project_id)
+        smoke = self.plane.cursor_smoke(dry_run=True)
         return {
             "action": "cursor_live_blocked",
             "runtime_mode": runtime_mode,
@@ -468,10 +469,18 @@ class SequentialOrchestrator:
             "live_blocked": True,
             "requirements": reqs,
             "prepared": prepared,
+            "smoke_dry_run": {
+                "execution_id": smoke.get("execution_id"),
+                "action": smoke.get("action"),
+            },
+            "integration_checkpoint": (
+                "Cursor ACP completion is not a merged GitHub PR; "
+                "do not auto-advance unrelated tasks from smoke results"
+            ),
             "note": (
                 "CURSOR_ACP_LIVE requires SANDBOX PASS, host authorization, "
-                "credential broker, pasta egress, verified image, and Owner triple-gate. "
-                "Successful ACP completion is not a merged GitHub PR."
+                "credential broker, verified UDS egress probe, verified image, "
+                "and Owner triple-gate. Successful ACP completion is not a merged GitHub PR."
             ),
         }
 
