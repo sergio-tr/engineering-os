@@ -338,6 +338,28 @@ def make_handler(state: AppState) -> Callable[..., BaseHTTPRequestHandler]:
                     status, body, ctype = _json_bytes(state.plane.runtime_inspect())
                     self._send(status, body, ctype)
                     return
+                if path == "/api/runtime/requirements":
+                    status, body, ctype = _json_bytes(state.plane.runtime_requirements())
+                    self._send(status, body, ctype)
+                    return
+                if path == "/api/cursor/status":
+                    status, body, ctype = _json_bytes(state.plane.cursor_status())
+                    self._send(status, body, ctype)
+                    return
+                if path == "/api/cursor/readiness":
+                    status, body, ctype = _json_bytes(state.plane.cursor_readiness())
+                    self._send(status, body, ctype)
+                    return
+                if path == "/api/cursor/image-plan":
+                    status, body, ctype = _json_bytes(state.plane.cursor_image_plan())
+                    self._send(status, body, ctype)
+                    return
+                if path == "/api/cursor/integration-check":
+                    status, body, ctype = _json_bytes(
+                        state.plane.cursor_integration_check()
+                    )
+                    self._send(status, body, ctype)
+                    return
                 if path == "/api/sandbox/readiness":
                     status, body, ctype = _json_bytes(state.plane.sandbox_readiness())
                     self._send(status, body, ctype)
@@ -667,6 +689,12 @@ def make_handler(state: AppState) -> Callable[..., BaseHTTPRequestHandler]:
                     )
                     self._send(status, body, ctype)
                     return
+                if path == "/api/cursor/demo":
+                    status, body, ctype = _json_bytes(
+                        state.plane.run_cursor_fixture_demo()
+                    )
+                    self._send(status, body, ctype)
+                    return
                 if path == "/api/sandbox/run-acp-fixture":
                     # Hard reject: real OCI execution is CLI/Owner-only.
                     status, body, ctype = _json_bytes(
@@ -674,6 +702,17 @@ def make_handler(state: AppState) -> Callable[..., BaseHTTPRequestHandler]:
                             "ok": False,
                             "error": "oci_execution_not_exposed_via_http",
                             "note": "Use CLI with Owner triple-gate locally",
+                        },
+                        403,
+                    )
+                    self._send(status, body, ctype)
+                    return
+                if path == "/api/cursor/launch":
+                    status, body, ctype = _json_bytes(
+                        {
+                            "ok": False,
+                            "error": "live_cursor_acp_disabled",
+                            "note": "No live Cursor execution button/path in EOS-09",
                         },
                         403,
                     )
