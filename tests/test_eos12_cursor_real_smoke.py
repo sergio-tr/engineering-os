@@ -109,9 +109,9 @@ class ProbeExecutorTests(unittest.TestCase):
             sock.write_text("", encoding="utf-8")
             relay = Path(tmp) / "relay.py"
             relay.write_text("print(1)\n", encoding="utf-8")
-            workload = write_probe_workload_script(Path(tmp) / "run.sh")
+            workload = write_probe_workload_script(Path(tmp) / "run.py")
             argv = build_probe_podman_argv(
-                image_ref="localhost/alpine:eos-fixture",
+                image_ref="sha256:" + ("c" * 64),
                 container_name="eos-netprobe-abcdefghijkl",
                 socket_host_path=str(sock),
                 relay_host_path=str(relay),
@@ -152,6 +152,8 @@ class ProbeExecutorTests(unittest.TestCase):
             )
             self.assertTrue(result.executed)
             self.assertFalse(result.dry_run)
+            self.assertEqual(result.status, "COMPLETED")
+            self.assertEqual(result.verification_level, "TRANSPORT_VERIFIED")
             self.assertTrue(
                 any(c["case"] == "broker_shutdown_interrupts" for c in result.cases)
             )

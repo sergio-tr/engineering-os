@@ -2535,11 +2535,13 @@ class ControlPlane:
         allow_phase_b: bool = False,
         owner_authorize_runtime_execution: bool = False,
         use_injected: bool = True,
+        image_ref: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Owner network enforcement probe.
 
         Default use_injected=True keeps automation/offline safe.
         Owner real Podman path: use_injected=False with triple-gate.
+        Image selection is dedicated — never resolve_local_fixture_image().
         """
         from engineering_os.infrastructure.network.broker.broker_runtime import BrokerRuntime
         from engineering_os.infrastructure.network.probe.network_probe_executor import (
@@ -2547,12 +2549,42 @@ class ControlPlane:
             NetworkProbeRequest,
             default_injected_probe_factory,
         )
-        from engineering_os.infrastructure.runtime.oci.podman_executor import (
-            resolve_local_fixture_image,
+        from engineering_os.infrastructure.network.probe.probe_image import (
+            ProbeImageError,
+            synthetic_probe_image,
+            validate_probe_image_ref,
         )
 
         owner_real = bool(execute and not dry_run and not use_injected)
-        runtime = BrokerRuntime()
+        # Composition root: only Owner-real path installs the live upstream
+        # opener + DNS resolver. Offline/injected paths keep blocked_connect.
+        from engineering_os.infrastructure.network.broker.egress_broker import (
+            blocked_connect,
+            default_resolve,
+            live_open_upstream,
+        )
+
+        if owner_real:
+            if not image_ref:
+                raise PolicyError("probe_image_ref_required")
+            try:
+                image_ref = validate_probe_image_ref(image_ref)
+            except ProbeImageError as exc:
+                raise PolicyError(str(exc)) from exc
+            runtime = BrokerRuntime(
+                connect_fn=live_open_upstream,
+                resolve_fn=default_resolve,
+            )
+        else:
+            runtime = BrokerRuntime(connect_fn=blocked_connect)
+            if image_ref:
+                try:
+                    image_ref = validate_probe_image_ref(image_ref)
+                except ProbeImageError:
+                    # Offline dry-run with bad/legacy tag → synthetic placeholder.
+                    image_ref = synthetic_probe_image().requested_ref
+            else:
+                image_ref = "" if dry_run or not execute else synthetic_probe_image().requested_ref
         self._broker_runtime = runtime
         executor = NetworkProbeExecutor(
             broker_runtime=runtime,
@@ -2567,11 +2599,10 @@ class ControlPlane:
         task = self.create_task(goal.goal_id, "Disposable network probe")
         self.approve_goal(goal.goal_id)
         execution = self.prepare_synthetic_execution(task.task_id)
-        image = resolve_local_fixture_image() or "localhost/alpine:eos-fixture"
         req = NetworkProbeRequest(
             execution_id=execution.execution_id,
             project_id=project.project_id,
-            image_ref=image,
+            image_ref=image_ref or "",
             correlation_id=execution.idempotency_key,
         )
         result = executor.run(
@@ -2587,10 +2618,19 @@ class ControlPlane:
         payload["action"] = "dry_run" if result.dry_run else (
             "executed" if result.executed else result.status.lower()
         )
-        payload["all_ok"] = bool(result.cases) and all(
-            c.get("ok") for c in result.cases
-        )
+        # Evidence-backed success only — never treat incomplete observations as PASS.
+        if result.dry_run:
+            payload["all_ok"] = bool(result.cases) and all(
+                c.get("ok") for c in result.cases
+            )
+        else:
+            payload["all_ok"] = (
+                result.status == "COMPLETED"
+                and result.policy_validated
+                and (result.transport_verified or result.enforcement_verified)
+            )
         payload["owner_path"] = "dry_run" if result.dry_run else "owner_execute"
+        payload["cli_ok"] = result.dry_run or result.status == "COMPLETED"
         # Persist durable evidence reference without secrets.
         self.evidence.store(
             execution.execution_id,

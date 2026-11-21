@@ -441,25 +441,8 @@ def cmd_network(args: argparse.Namespace) -> int:
                 execute = bool(getattr(args, "execute", False))
                 dry_run = bool(getattr(args, "dry_run", False)) or not execute
                 use_injected = not execute
-                _print(
-                    plane.network_probe(
-                        dry_run=dry_run,
-                        execute=execute,
-                        allow_phase_b=bool(getattr(args, "allow_phase_b", False)),
-                        owner_authorize_runtime_execution=bool(
-                            getattr(args, "owner_authorize_runtime_execution", False)
-                        ),
-                        use_injected=use_injected,
-                    )
-                )
-                return 0
-            return 2
-        if cmd == "probe":
-            execute = bool(getattr(args, "execute", False))
-            dry_run = bool(getattr(args, "dry_run", False)) or not execute
-            use_injected = not execute
-            _print(
-                plane.network_probe(
+                image_ref = getattr(args, "image_ref", None) or None
+                payload = plane.network_probe(
                     dry_run=dry_run,
                     execute=execute,
                     allow_phase_b=bool(getattr(args, "allow_phase_b", False)),
@@ -467,8 +450,31 @@ def cmd_network(args: argparse.Namespace) -> int:
                         getattr(args, "owner_authorize_runtime_execution", False)
                     ),
                     use_injected=use_injected,
+                    image_ref=image_ref,
                 )
+                _print(payload)
+                if execute and not payload.get("cli_ok", False):
+                    return 1
+                return 0
+            return 2
+        if cmd == "probe":
+            execute = bool(getattr(args, "execute", False))
+            dry_run = bool(getattr(args, "dry_run", False)) or not execute
+            use_injected = not execute
+            image_ref = getattr(args, "image_ref", None) or None
+            payload = plane.network_probe(
+                dry_run=dry_run,
+                execute=execute,
+                allow_phase_b=bool(getattr(args, "allow_phase_b", False)),
+                owner_authorize_runtime_execution=bool(
+                    getattr(args, "owner_authorize_runtime_execution", False)
+                ),
+                use_injected=use_injected,
+                image_ref=image_ref,
             )
+            _print(payload)
+            if execute and not payload.get("cli_ok", False):
+                return 1
             return 0
         return 2
     finally:
@@ -1120,6 +1126,14 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         default=False,
     )
+    c.add_argument(
+        "--image-ref",
+        default=None,
+        help=(
+            "Immutable local OCI image ID or digest (sha256:…). "
+            "Floating tags rejected; never pulls."
+        ),
+    )
     c.set_defaults(func=cmd_network)
     nb = ns.add_parser("broker", help="Trusted egress broker status/probe")
     nbs = nb.add_subparsers(dest="network_broker_cmd", required=False)
@@ -1133,6 +1147,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--owner-authorize-runtime-execution",
         action="store_true",
         default=False,
+    )
+    c.add_argument(
+        "--image-ref",
+        default=None,
+        help=(
+            "Immutable local OCI image ID or digest (sha256:…). "
+            "Floating tags rejected; never pulls."
+        ),
     )
     c.set_defaults(func=cmd_network)
     nb.set_defaults(func=cmd_network)
