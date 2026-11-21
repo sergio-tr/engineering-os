@@ -19,12 +19,17 @@ from engineering_os.infrastructure.credential_provider import (
     redact_secrets,
 )
 from engineering_os.infrastructure.cursor_runtime import CursorRuntimePlanner
-from engineering_os.infrastructure.egress_enforcer import PastaAllowlistEgressPolicy
+from engineering_os.infrastructure.egress_broker import (
+    broker_podman_args,
+    cursor_proxy_compatibility,
+)
+from engineering_os.infrastructure.egress_enforcer import (
+    PastaAllowlistEgressPolicy,
+    UdsBrokerEgressPolicy,
+)
 from engineering_os.infrastructure.evidence import (
     CURSOR_ACP_LIVE,
-    ERROR,
     SYNTHETIC_IN_MEMORY,
-    UNAVAILABLE,
 )
 from engineering_os.infrastructure.network_policy import NetworkPolicy, UnenforcedNetworkPolicy
 from engineering_os.infrastructure.oci_process import (
@@ -60,9 +65,13 @@ class CursorLaunchRequest:
     pids_limit: int = 128
     wall_clock_seconds: int = 120
     correlation_id: str = ""
-    network_mode: str = "eos-cursor-egress"
+    network_mode: str = "none"
     credential_provider_id: str = ""
     network_policy_id: str = ""
+    broker_socket_host_path: str = ""
+    relay_host_path: str = ""
+    deny_untrusted_tools: bool = True
+    smoke_mode: str = "ask"
 
 
 @dataclass
@@ -104,11 +113,20 @@ def build_cursor_podman_argv(
         raise OciProcessError("invalid_container_name", code="name")
     if list(acp_argv) not in (["agent", "acp"], ["cursor-agent", "acp"]):
         raise OciProcessError("unapproved_acp_command", code="command")
-    net_args = list(network_args or ["--network", "eos-cursor-egress"])
+    net_args = list(network_args or ["--network", "none"])
     if "--network" in net_args:
         idx = net_args.index("--network")
         if idx + 1 < len(net_args) and net_args[idx + 1] in {"host", "private"}:
             raise OciProcessError("host_network_forbidden", code="network")
+        if idx + 1 < len(net_args) and net_args[idx + 1] != "none":
+            # EOS-11 default enforceable path is network=none + UDS broker.
+            raise OciProcessError(
+                "non_none_network_requires_verified_enforcement",
+                code="network",
+            )
+    extra_mounts: List[str] = []
+    # Optional broker mounts appended by caller via network_args side channel
+    # are not used; mounts are passed separately through build kwargs below.
     argv = [
         "podman",
         "run",
@@ -137,8 +155,11 @@ def build_cursor_podman_argv(
         "/runtime/cache:rw,size=64m",
         "--tmpfs",
         "/runtime/config:rw,size=16m",
+        "--tmpfs",
+        "/runtime/egress:rw,size=8m",
         "--mount",
         f"type=bind,src={workspace_host_path},dst=/workspace,ro",
+        *extra_mounts,
         "--workdir",
         "/workspace",
         "--name",
@@ -153,7 +174,12 @@ def build_cursor_podman_argv(
         "PATH=/usr/local/bin:/usr/bin:/bin",
         "-e",
         "CURSOR_DISABLE_AUTO_UPDATE=1",
+        "-e",
+        "EOS_CURSOR_SMOKE_MODE=ask",
+        "-e",
+        "EOS_DENY_UNTRUSTED_TOOLS=1",
         # CURSOR_API_KEY is passed via env dict to Popen — never as argv value.
+        # HTTPS_PROXY points at loopback relay only when broker mounts are present.
         image_ref,
         *list(acp_argv),
     ]
@@ -208,24 +234,40 @@ class CursorAcpLauncher:
         if not cred.get("available"):
             blocked.append("credential_provider_unavailable")
         net = self.network.readiness()
-        if net.get("status") not in {"READY", "READY_FIXTURE"}:
+        acceptable_net = {"READY", "READY_FIXTURE", "READY_FOR_OWNER_PROBE"}
+        if net.get("status") not in acceptable_net:
             blocked.append("egress_enforcement_unavailable")
+        if net.get("enforcement") == "NOT_ENFORCED" and net.get("status") != "READY_FIXTURE":
+            blocked.append("egress_not_enforced")
+        if isinstance(self.network, PastaAllowlistEgressPolicy):
+            blocked.append("pasta_policy_rejected_use_uds_broker")
         egress = self.network.evaluate("api.cursor.com")
         if not egress.allowed and net.get("status") != "READY_FIXTURE":
             blocked.append("cursor_egress_denied")
-        # IP literal bypass sample
         if self.network.evaluate("1.2.3.4").allowed:
             blocked.append("ip_literal_bypass_possible")
         if self.auth_verifier is None:
             blocked.append("runtime_authorization_missing")
+        if request.deny_untrusted_tools is False:
+            blocked.append("untrusted_tools_must_be_denied_until_credential_isolation")
         blocked.append("live_cursor_requires_owner_triple_gate")
+        proxy_diag = cursor_proxy_compatibility()
+        if proxy_diag.get("live_blocked_until_owner_probe"):
+            blocked.append("cursor_proxy_compatibility_not_owner_probed")
 
-        network_args: List[str] = ["--network", request.network_mode]
-        if isinstance(self.network, PastaAllowlistEgressPolicy):
-            try:
-                network_args = self.network.podman_network_args()
-            except RuntimeError:
-                blocked.append("pasta_network_args_unavailable")
+        network_args: List[str] = ["--network", "none"]
+        if isinstance(self.network, UdsBrokerEgressPolicy):
+            network_args = self.network.podman_network_args()
+        elif request.network_mode and request.network_mode != "none":
+            blocked.append("non_none_network_forbidden_without_verified_enforcement")
+
+        broker_fragment: Dict[str, Any] = {}
+        if request.broker_socket_host_path and request.relay_host_path:
+            broker_fragment = broker_podman_args(
+                socket_host_path=request.broker_socket_host_path,
+                relay_host_path=request.relay_host_path,
+            )
+            network_args = list(broker_fragment["network_args"])
 
         argv: List[str] = []
         try:
@@ -239,23 +281,43 @@ class CursorAcpLauncher:
                 pids_limit=request.pids_limit,
                 network_args=network_args,
             )
+            for mount in broker_fragment.get("mounts") or []:
+                # Insert mounts before image ref.
+                img_idx = argv.index(request.image_ref)
+                argv[img_idx:img_idx] = ["--mount", mount]
+            for key, value in (broker_fragment.get("env") or {}).items():
+                img_idx = argv.index(request.image_ref)
+                argv[img_idx:img_idx] = ["-e", f"{key}={value}"]
         except OciProcessError as exc:
             blocked.append(str(exc))
 
         controls = {
             "read_only_root": True,
             "host_network": False,
+            "network_none": True,
             "cap_drop_all": True,
             "no_new_privileges": True,
             "pull_never": True,
             "secrets_not_in_argv": True,
             "workspace_bind_ro": True,
             "auto_update_disabled": True,
+            "deny_untrusted_tools": bool(request.deny_untrusted_tools),
+            "smoke_mode": request.smoke_mode,
+            "credential_env_not_isolated_from_peers": True,
+            "broker_mounts": bool(broker_fragment),
         }
         mode = "BLOCKED" if blocked else "PLANNED"
         return CursorLaunchPlan(
             argv=argv,
-            env_keys=["CURSOR_API_KEY", "HOME", "PATH", "CURSOR_DISABLE_AUTO_UPDATE"],
+            env_keys=[
+                "CURSOR_API_KEY",
+                "HOME",
+                "PATH",
+                "CURSOR_DISABLE_AUTO_UPDATE",
+                "HTTPS_PROXY",
+                "HTTP_PROXY",
+                "EOS_DENY_UNTRUSTED_TOOLS",
+            ],
             controls=controls,
             blocked_reasons=sorted(set(blocked)),
             mode=mode,

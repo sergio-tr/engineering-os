@@ -126,8 +126,11 @@ class CursorBridge:
         missing.extend(st["preflight"].get("missing") or [])
         if not st["credentials"].get("available"):
             missing.append("credential_provider")
-        if st["network"].get("status") == "BLOCKED":
-            missing.append("network_policy_enforcement")
+        if st["network"].get("status") == "BLOCKED" or st["network"].get(
+            "enforcement"
+        ) in {None, "NOT_ENFORCED"}:
+            if st["network"].get("status") != "READY_FIXTURE":
+                missing.append("network_policy_enforcement")
         if not self.runtime.image_digest:
             if "image_digest_verified" not in missing:
                 missing.append("verified_image_digest")

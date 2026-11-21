@@ -412,6 +412,31 @@ def cmd_runtime(args: argparse.Namespace) -> int:
         plane.close()
 
 
+def cmd_network(args: argparse.Namespace) -> int:
+    plane = _plane(args.db)
+    try:
+        if args.network_cmd == "status":
+            _print(plane.network_status())
+            return 0
+        if args.network_cmd == "probe":
+            execute = bool(getattr(args, "execute", False))
+            dry_run = bool(getattr(args, "dry_run", False)) or not execute
+            _print(
+                plane.network_probe(
+                    dry_run=dry_run,
+                    execute=execute,
+                    allow_phase_b=bool(getattr(args, "allow_phase_b", False)),
+                    owner_authorize_runtime_execution=bool(
+                        getattr(args, "owner_authorize_runtime_execution", False)
+                    ),
+                )
+            )
+            return 0
+        return 2
+    finally:
+        plane.close()
+
+
 def cmd_cursor(args: argparse.Namespace) -> int:
     cmd = args.cursor_cmd
     if cmd == "demo-fixture":
@@ -463,12 +488,22 @@ def cmd_cursor(args: argparse.Namespace) -> int:
                         image_id=getattr(args, "image_id", None),
                         cursor_version=getattr(args, "cursor_version", None),
                         artifact_checksum=getattr(args, "artifact_checksum", None),
+                        artifact_path=getattr(args, "artifact_path", None),
                         base_digest=getattr(args, "base_digest", None),
                         write_evidence=bool(getattr(args, "write_evidence", False)),
+                        use_local_inspect=bool(getattr(args, "use_local_inspect", False)),
                     )
                 )
                 return 0
             return 2
+        finally:
+            plane.close()
+
+    if cmd == "live-preflight":
+        plane = _plane(args.db)
+        try:
+            _print(plane.cursor_live_preflight())
+            return 0
         finally:
             plane.close()
 
@@ -1027,6 +1062,21 @@ def build_parser() -> argparse.ArgumentParser:
     c = rs.add_parser("requirements")
     c.set_defaults(func=cmd_runtime)
 
+    p = sub.add_parser("network", help="Egress broker / Podman network enforcement (EOS-11)")
+    ns = p.add_subparsers(dest="network_cmd", required=True)
+    c = ns.add_parser("status")
+    c.set_defaults(func=cmd_network)
+    c = ns.add_parser("probe")
+    c.add_argument("--dry-run", action="store_true", default=False)
+    c.add_argument("--execute", action="store_true", default=False)
+    c.add_argument("--allow-phase-b", action="store_true", default=False)
+    c.add_argument(
+        "--owner-authorize-runtime-execution",
+        action="store_true",
+        default=False,
+    )
+    c.set_defaults(func=cmd_network)
+
     p = sub.add_parser("cursor", help="Cursor ACP runtime integration (EOS-09/10)")
     cs = p.add_subparsers(dest="cursor_cmd", required=True)
     c = cs.add_parser("status")
@@ -1044,10 +1094,14 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--image-id", default=None)
     c.add_argument("--cursor-version", default=None)
     c.add_argument("--artifact-checksum", default=None)
+    c.add_argument("--artifact-path", default=None)
     c.add_argument("--base-digest", default=None)
     c.add_argument("--write-evidence", action="store_true")
+    c.add_argument("--use-local-inspect", action="store_true")
     c.set_defaults(func=cmd_cursor)
     c = cs.add_parser("readiness")
+    c.set_defaults(func=cmd_cursor)
+    c = cs.add_parser("live-preflight")
     c.set_defaults(func=cmd_cursor)
     c = cs.add_parser("session-plan")
     c.add_argument("--execution-id", required=True)

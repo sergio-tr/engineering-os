@@ -2491,14 +2491,129 @@ class ControlPlane:
             "note": "No Cursor/OpenClaw/containers/network/credentials used",
         }
 
+    def network_status(self) -> Dict[str, Any]:
+        from engineering_os.infrastructure.egress_broker import (
+            TrustedEgressBroker,
+            cursor_proxy_compatibility,
+        )
+        from engineering_os.infrastructure.egress_enforcer import (
+            PastaAllowlistEgressPolicy,
+            select_egress_policy,
+        )
+        from engineering_os.infrastructure.podman_capabilities import (
+            probe_podman_capabilities,
+        )
+
+        caps = probe_podman_capabilities()
+        pasta = PastaAllowlistEgressPolicy(capabilities=caps)
+        selected = select_egress_policy(capabilities=caps)
+        broker = TrustedEgressBroker()
+        return {
+            "podman": caps.to_dict(),
+            "pasta_policy": pasta.readiness(),
+            "selected_policy": selected.readiness(),
+            "broker": broker.readiness(),
+            "proxy_compatibility": cursor_proxy_compatibility(),
+            "enforcement": selected.readiness().get("enforcement", "NOT_ENFORCED"),
+            "live_cursor_acp": False,
+            "note": (
+                "Podman 3.4.4 cannot use pasta network mode. "
+                "Use --network=none + UDS broker; never treat pasta binary as ENFORCED."
+            ),
+        }
+
+    def network_probe(
+        self,
+        *,
+        dry_run: bool = True,
+        execute: bool = False,
+        allow_phase_b: bool = False,
+        owner_authorize_runtime_execution: bool = False,
+    ) -> Dict[str, Any]:
+        from engineering_os.infrastructure.egress_broker import TrustedEgressBroker
+        from engineering_os.infrastructure.podman_executor import (
+            require_owner_execution_gates,
+        )
+
+        broker = TrustedEgressBroker()
+        plan = broker.probe_plan()
+        if dry_run or not execute:
+            return {
+                **plan,
+                "owner_path": "dry_run",
+                "executed": False,
+            }
+        require_owner_execution_gates(
+            execute=execute,
+            allow_phase_b=allow_phase_b,
+            owner_authorize_runtime_execution=owner_authorize_runtime_execution,
+        )
+        # Real container probe is Owner-only and not auto-run in EOS-11 automation.
+        return {
+            "action": "owner_probe_authorized_but_not_auto_executed",
+            "executed": False,
+            "plan": plan,
+            "owner_commands": [
+                "# After broker socket + relay script are prepared:",
+                "python3 -c \"from engineering_os.infrastructure.egress_broker import "
+                "TrustedEgressBroker, write_tcp_uds_relay_script; "
+                "b=TrustedEgressBroker(); p=b.start_unix_server(); "
+                "print(p)\"",
+                "podman run --rm -i --network none --pull=never "
+                "--mount type=bind,src=<SOCK>,dst=/runtime/egress/broker.sock "
+                "--mount type=bind,src=<RELAY>,dst=/runtime/egress/relay.py,ro "
+                "-e HTTPS_PROXY=http://127.0.0.1:18080 "
+                "-e HTTP_PROXY=http://127.0.0.1:18080 "
+                "<fixture-image> python3 /runtime/egress/relay.py "
+                "wget -qO- https://api.cursor.com/  # expect broker allow/deny evidence",
+            ],
+            "required_demonstrations": [
+                "allowed_destination_via_broker",
+                "unapproved_public_blocked",
+                "direct_ip_blocked",
+                "private_network_blocked",
+                "host_gateway_blocked",
+                "dns_and_ipv6_bypass_blocked",
+                "broker_interrupt_fail_closed",
+                "container_cleanup_ok",
+            ],
+            "live_cursor_acp": False,
+            "note": "EOS-11 does not launch containers; Owner runs the probe explicitly",
+        }
+
+    def cursor_live_preflight(self) -> Dict[str, Any]:
+        from engineering_os.infrastructure.live_preflight import CursorLivePreflight
+
+        return CursorLivePreflight(
+            runtime=self.cursor.runtime,
+            credentials=self.cursor.credentials,
+            network=self.cursor.network,
+            workspace=self.cursor.workspace,
+            auth_verifier=self.cursor.auth_verifier,
+            sandbox_gate=self.sandbox_gate,
+        ).run()
+
     def owner_deployment_sequence(self) -> Dict[str, Any]:
         """Exact Owner-operated sequence for real environment preparation."""
         return {
             "live_cursor_acp": False,
             "sandbox_gate": self.sandbox_gate,
+            "podman_note": (
+                "Host observed Podman 3.4.4: do NOT install passt expecting pasta "
+                "mode; use --network=none + UDS egress broker."
+            ),
             "steps": [
                 {
                     "step": 1,
+                    "title": "Verify Podman capabilities",
+                    "commands": [
+                        "podman --version",
+                        "podman info --format '{{.Host.Security.Rootless}}'",
+                        "python3 scripts/eos.py network status",
+                    ],
+                },
+                {
+                    "step": 2,
                     "title": "Build Cursor image",
                     "commands": [
                         "python3 scripts/eos.py cursor image build-plan",
@@ -2506,7 +2621,6 @@ class ControlPlane:
                         "podman image inspect --format '{{.Digest}}' docker.io/library/debian:bookworm-slim",
                         "# Install Cursor CLI per https://cursor.com/install into containers/cursor-acp/vendor/",
                         "sha256sum containers/cursor-acp/vendor/cursor-agent",
-                        "agent --version  # or ./vendor/cursor-agent --version",
                         "podman build --build-arg BASE_IMAGE=debian@sha256:<BASE_DIGEST> "
                         "-t localhost/eos-cursor-acp-runtime:eos10 "
                         "-f containers/cursor-acp/Containerfile containers/cursor-acp",
@@ -2515,48 +2629,42 @@ class ControlPlane:
                     ],
                 },
                 {
-                    "step": 2,
-                    "title": "Verify image identity",
+                    "step": 3,
+                    "title": "Verify image identity from local OCI + artifact bytes",
                     "commands": [
                         "python3 scripts/eos.py cursor image inspect",
-                        "python3 scripts/eos.py cursor image verify --write-evidence "
-                        "--image-digest sha256:<DIGEST> --cursor-version <VER> "
-                        "--artifact-checksum sha256:<BIN_SHA> --base-digest sha256:<BASE>",
+                        "python3 scripts/eos.py cursor image verify --use-local-inspect "
+                        "--artifact-path containers/cursor-acp/vendor/cursor-agent "
+                        "--cursor-version <VER> --base-digest sha256:<BASE> --write-evidence",
                     ],
-                },
-                {
-                    "step": 3,
-                    "title": "Configure credential delivery",
-                    "commands": [
-                        "install -m 600 /dev/null \"$HOME/.config/eos/cursor_api_key\"",
-                        "# Place CURSOR_API_KEY value in that file (Owner only)",
-                        "export EOS_CURSOR_API_KEY_FILE=\"$HOME/.config/eos/cursor_api_key\"",
-                        "# Enable OwnerEnvFileCredentialProvider in control-plane config (disabled by default)",
-                    ],
+                    "note": "Do not write evidence from manually invented checksums alone",
                 },
                 {
                     "step": 4,
-                    "title": "Configure and verify egress enforcement",
+                    "title": "Configure credential delivery (still disabled for live)",
                     "commands": [
-                        "sudo apt-get install -y passt  # provides pasta for rootless Podman",
-                        "podman network create eos-cursor-egress",
-                        "python3 scripts/eos.py cursor readiness",
+                        "install -m 600 /dev/null \"$HOME/.config/eos/cursor_api_key\"",
+                        "export EOS_CURSOR_API_KEY_FILE=\"$HOME/.config/eos/cursor_api_key\"",
+                        "# Keep provider disabled until network probe passes",
                     ],
-                    "blocker_if_missing": "pasta_or_passt_binary",
                 },
                 {
                     "step": 5,
-                    "title": "Verify storage/resource constraints",
+                    "title": "Configure UDS egress broker (not pasta)",
                     "commands": [
-                        "python3 scripts/eos.py runtime requirements",
-                        "python3 scripts/eos.py cursor readiness",
+                        "python3 scripts/eos.py network status",
+                        "python3 scripts/eos.py network probe --dry-run",
+                        "# Owner-gated real probe (launches disposable workload):",
+                        "python3 scripts/eos.py network probe --execute --allow-phase-b "
+                        "--owner-authorize-runtime-execution",
                     ],
+                    "blocker_if_missing": "uds_broker_enforcement_unproven",
                 },
                 {
                     "step": 6,
-                    "title": "Inspect runtime readiness",
+                    "title": "Unified live preflight",
                     "commands": [
-                        "python3 scripts/eos.py cursor readiness",
+                        "python3 scripts/eos.py cursor live-preflight",
                         "python3 scripts/eos.py runtime requirements",
                     ],
                 },
@@ -2571,14 +2679,13 @@ class ControlPlane:
                 },
                 {
                     "step": 8,
-                    "title": "Authorized live ACP smoke (only after SANDBOX PASS)",
+                    "title": "Authorized live ACP smoke (only after SANDBOX PASS + probe)",
                     "commands": [
                         "python3 scripts/eos.py cursor smoke --dry-run",
-                        "# Requires canonical SANDBOX gate PASS + fresh host authorization:",
                         "python3 scripts/eos.py cursor smoke --execute --allow-phase-b "
                         "--owner-authorize-runtime-execution",
                     ],
-                    "note": "Do not enable via SANDBOX_GATE env alone; UI sandbox_gate never launches",
+                    "note": "UI sandbox_gate never launches; env SANDBOX_GATE alone insufficient",
                 },
             ],
         }

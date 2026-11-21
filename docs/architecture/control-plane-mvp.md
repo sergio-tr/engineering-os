@@ -154,12 +154,25 @@ Operational components required before a controlled Cursor ACP experiment:
 - Read-only WSL2 preflight with STATIC/HOST/RUNTIME/NOT_TESTED/BLOCKED evidence
 - Credential broker: fixture + Owner env-file provider (disabled by default);
   secrets never in SQLite/argv/logs; env injection does not claim peer isolation
-- Concrete pasta allowlist egress enforcer for rootless Podman (fail closed if missing)
 - Runtime authorization bound to execution/task/workspace/image/command/creds/network
 - Cursor OCI launcher + smoke dry-run; execute path requires SANDBOX PASS + host auth
   + Owner triple-gate (HTTP never exposes live execute)
 - Orchestrator runtime modes: `SYNTHETIC_IN_MEMORY`, `SYNTHETIC_OCI_EXECUTED`,
   `CURSOR_ACP_LIVE` (last remains blocked until prerequisites)
+
+## Enforced egress (EOS-11)
+
+Host verification showed **Podman 3.4.4** (pasta mode requires ≥ 4.4.1). Pasta binary
+presence is never reported as ENFORCED destination filtering.
+
+Concrete path:
+
+- Container: `--network=none` (no direct outbound)
+- Host: `TrustedEgressBroker` on a Unix domain socket (allowlist + DNS checks)
+- In-container TCP→UDS relay for `HTTPS_PROXY` loopback only
+- Owner commands: `eos network status`, `eos network probe --dry-run`,
+  Owner-gated `eos network probe --execute ...`
+- `eos cursor live-preflight` reports real blockers; never READY from mocks alone
 
 ## Assumptions
 

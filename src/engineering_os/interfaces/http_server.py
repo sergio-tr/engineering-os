@@ -378,6 +378,22 @@ def make_handler(state: AppState) -> Callable[..., BaseHTTPRequestHandler]:
                     )
                     self._send(status, body, ctype)
                     return
+                if path == "/api/cursor/live-preflight":
+                    status, body, ctype = _json_bytes(
+                        state.plane.cursor_live_preflight()
+                    )
+                    self._send(status, body, ctype)
+                    return
+                if path == "/api/network/status":
+                    status, body, ctype = _json_bytes(state.plane.network_status())
+                    self._send(status, body, ctype)
+                    return
+                if path == "/api/network/probe":
+                    status, body, ctype = _json_bytes(
+                        state.plane.network_probe(dry_run=True)
+                    )
+                    self._send(status, body, ctype)
+                    return
                 if path == "/api/cursor/smoke":
                     # Dry-run only via HTTP; execute path is CLI/Owner-only.
                     status, body, ctype = _json_bytes(

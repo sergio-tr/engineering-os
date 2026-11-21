@@ -130,6 +130,13 @@ class UnavailableCursorCredentialProvider(CredentialProvider):
                 "privilege code in the container; deny untrusted tool execution "
                 "or separate credential-bearing processes."
             ),
+            "separations": {
+                "credential_bearing_cursor_process": "required",
+                "untrusted_project_tool_execution": "denied_in_smoke_until_isolated",
+                "workspace_files": "must_not_contain_secrets",
+                "host_side_credential_provider": "outside_workspace",
+            },
+            "env_var_isolates_untrusted_code": False,
             "note": "Trusted host-side broker not configured; fail closed",
         }
 
@@ -249,6 +256,13 @@ class OwnerEnvFileCredentialProvider(CredentialProvider):
                 "Secret in process env is visible to equivalent-privilege code "
                 "in the same container; deny untrusted tools or separate processes."
             ),
+            "env_var_isolates_untrusted_code": False,
+            "separations": {
+                "credential_bearing_cursor_process": "env_injection",
+                "untrusted_project_tool_execution": "denied_in_smoke_until_isolated",
+                "workspace_files": "forbidden_secret_path",
+                "host_side_credential_provider": "EOS_CURSOR_API_KEY_FILE",
+            },
             "note": "Disabled by default; Owner must enable explicitly",
         }
 

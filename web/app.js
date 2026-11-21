@@ -930,6 +930,41 @@
     }
   });
 
+  $("btn-cursor-live-preflight").addEventListener("click", async () => {
+    try {
+      const data = await api("/api/cursor/live-preflight");
+      const el = $("cursor-panel");
+      el.classList.remove("empty");
+      el.innerHTML = `
+        <div class="row">Live preflight ${badge(data.overall_status)}</div>
+        <div class="meta">Launch eligible: ${escapeHtml(String(data.launch_eligible))} · Live ${data.live_cursor_acp ? "ON" : "disabled"}</div>
+        <div class="meta">Podman: ${escapeHtml(((data.podman && data.podman.version) || "—"))} · pasta supported: ${escapeHtml(String((data.podman && data.podman.pasta_network_mode_supported)))}</div>
+        <div class="meta">Egress enforcement: ${escapeHtml(((data.network && data.network.enforcement) || "NOT_ENFORCED"))}</div>
+        <div class="meta">Missing: ${escapeHtml((data.missing || []).join(", ") || "none")}</div>
+      `;
+    } catch (err) {
+      toast(err.message, true);
+    }
+  });
+
+  $("btn-network-status").addEventListener("click", async () => {
+    try {
+      const data = await api("/api/network/status");
+      const el = $("cursor-panel");
+      el.classList.remove("empty");
+      el.innerHTML = `
+        <div class="row">Network ${badge((data.selected_policy && data.selected_policy.status) || "BLOCKED")}</div>
+        <div class="meta">Enforcement: ${escapeHtml(data.enforcement || "NOT_ENFORCED")}</div>
+        <div class="meta">Podman: ${escapeHtml(((data.podman && data.podman.version) || "—"))} · pasta mode: ${escapeHtml(String((data.podman && data.podman.pasta_network_mode_supported)))}</div>
+        <div class="meta">Pasta policy: ${escapeHtml(((data.pasta_policy && data.pasta_policy.enforcement) || "—"))}</div>
+        <div class="meta">Selected: ${escapeHtml(((data.selected_policy && data.selected_policy.policy_id) || "—"))}</div>
+        <div class="meta">${escapeHtml(data.note || "")}</div>
+      `;
+    } catch (err) {
+      toast(err.message, true);
+    }
+  });
+
   $("btn-cursor-smoke").addEventListener("click", async () => {
     try {
       const data = await api("/api/cursor/smoke");
