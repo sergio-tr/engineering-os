@@ -7,11 +7,11 @@ from typing import Any, Dict, Optional
 from engineering_os.domain.models import utc_now
 from engineering_os.infrastructure.adapters import CoordinatorAdapter
 from engineering_os.infrastructure.evidence import ERROR, LIVE_READ_ONLY, UNAVAILABLE
-from engineering_os.infrastructure.gateway_transport import (
+from engineering_os.infrastructure.integrations.openclaw.gateway_transport import (
     GatewayTransport,
     UnavailableGatewayTransport,
 )
-from engineering_os.infrastructure.openclaw_client import (
+from engineering_os.infrastructure.integrations.openclaw.openclaw_client import (
     OpenClawCliClient,
     OpenClawClientError,
 )

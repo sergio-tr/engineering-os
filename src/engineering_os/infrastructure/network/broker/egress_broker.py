@@ -26,7 +26,7 @@ import tempfile
 import threading
 
 from engineering_os.domain.models import new_id, utc_now
-from engineering_os.infrastructure.egress_enforcer import (
+from engineering_os.infrastructure.network.policy.egress_enforcer import (
     DEFAULT_CURSOR_DESTINATIONS,
     is_ip_literal,
     is_private_or_link_local,

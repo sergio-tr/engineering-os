@@ -12,7 +12,7 @@ import time
 import uuid
 
 from engineering_os.infrastructure.evidence import ERROR, LIVE_READ_ONLY, UNAVAILABLE
-from engineering_os.infrastructure.gateway_transport import (
+from engineering_os.infrastructure.integrations.openclaw.gateway_transport import (
     GatewaySessionState,
     GatewayTransport,
     UnavailableGatewayTransport,

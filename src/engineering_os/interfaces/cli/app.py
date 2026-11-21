@@ -11,7 +11,7 @@ from typing import Any, Optional
 from engineering_os.application.orchestrator import SequentialOrchestrator
 from engineering_os.application.services import ControlPlane, PolicyError, dumps
 from engineering_os.domain.states import IllegalTransitionError
-from engineering_os.infrastructure.sqlite_repo import Repository, default_db_path
+from engineering_os.infrastructure.persistence.sqlite import Repository, default_db_path
 
 
 def _plane(db: Optional[str]) -> ControlPlane:
@@ -320,8 +320,8 @@ def cmd_integrations(args: argparse.Namespace) -> int:
             build_paperclip_fixture_transport,
             openclaw_fixture_runner,
         )
-        from engineering_os.infrastructure.openclaw_client import OpenClawCliClient
-        from engineering_os.infrastructure.sqlite_repo import Repository
+        from engineering_os.infrastructure.integrations.openclaw.openclaw_client import OpenClawCliClient
+        from engineering_os.infrastructure.persistence.sqlite import Repository
 
         path = Path(args.db) if args.db else default_db_path()
         if args.temp:
@@ -835,7 +835,7 @@ def cmd_github(args: argparse.Namespace) -> int:
             )
             return 0
         if action == "demo-fixture":
-            from engineering_os.infrastructure.github_fixtures import (
+            from engineering_os.infrastructure.integrations.github.github_fixtures import (
                 build_demo_fixture_transport,
             )
 
@@ -846,7 +846,7 @@ def cmd_github(args: argparse.Namespace) -> int:
 
                 path = Path(tempfile.mkdtemp(prefix="eos-gh-")) / "demo.sqlite3"
             from engineering_os.application.services import ControlPlane
-            from engineering_os.infrastructure.sqlite_repo import Repository
+            from engineering_os.infrastructure.persistence.sqlite import Repository
 
             plane2 = ControlPlane(
                 Repository(path), github_transport=build_demo_fixture_transport()

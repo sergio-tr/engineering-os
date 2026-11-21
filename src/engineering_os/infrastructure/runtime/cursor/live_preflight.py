@@ -4,25 +4,25 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from engineering_os.infrastructure.credential_provider import CredentialProvider
-from engineering_os.infrastructure.cursor_image import inspect_local_image, verify_image_identity
-from engineering_os.infrastructure.cursor_runtime import CursorRuntimePlanner
-from engineering_os.infrastructure.egress_broker import (
+from engineering_os.infrastructure.security.credentials.credential_provider import CredentialProvider
+from engineering_os.infrastructure.runtime.cursor.cursor_image import inspect_local_image, verify_image_identity
+from engineering_os.infrastructure.runtime.cursor.cursor_runtime import CursorRuntimePlanner
+from engineering_os.infrastructure.network.broker.egress_broker import (
     TrustedEgressBroker,
     cursor_proxy_compatibility,
 )
 from engineering_os.infrastructure.evidence import ERROR, SYNTHETIC, UNAVAILABLE
-from engineering_os.infrastructure.network_policy import NetworkPolicy
-from engineering_os.infrastructure.podman_capabilities import probe_podman_capabilities
-from engineering_os.infrastructure.runtime_authorization import RuntimeAuthorizationVerifier
-from engineering_os.infrastructure.runtime_preflight import (
+from engineering_os.infrastructure.network.policy.network_policy import NetworkPolicy
+from engineering_os.infrastructure.runtime.oci.podman_capabilities import probe_podman_capabilities
+from engineering_os.infrastructure.security.authorization.runtime_authorization import RuntimeAuthorizationVerifier
+from engineering_os.infrastructure.runtime.cursor.runtime_preflight import (
     EVIDENCE_BLOCKED,
     EVIDENCE_HOST,
     EVIDENCE_NOT_TESTED,
     EVIDENCE_STATIC,
     CursorRuntimePreflight,
 )
-from engineering_os.infrastructure.workspace_prep import WorkspacePreparer
+from engineering_os.infrastructure.runtime.cursor.workspace_prep import WorkspacePreparer
 
 
 def _item(key: str, *, ok: bool, evidence: str, detail: Any = None) -> Dict[str, Any]:

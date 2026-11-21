@@ -6,21 +6,21 @@ from typing import Any, Dict, List, Optional
 import uuid
 
 from engineering_os.domain.models import new_id, utc_now
-from engineering_os.infrastructure.acp_protocol import (
+from engineering_os.infrastructure.acp.protocol.acp_protocol import (
     AcpProtocolError,
     initialize_params,
     make_request,
     make_response,
     parse_message,
 )
-from engineering_os.infrastructure.acp_states import assert_acp_transition
-from engineering_os.infrastructure.acp_transport import (
+from engineering_os.infrastructure.acp.protocol.acp_states import assert_acp_transition
+from engineering_os.infrastructure.acp.transports.acp_transport import (
     AcpPermissionPolicy,
     AcpTransport,
     AcpTransportError,
 )
 from engineering_os.infrastructure.evidence import SYNTHETIC
-from engineering_os.infrastructure.sqlite_repo import Repository
+from engineering_os.infrastructure.persistence.sqlite import Repository
 
 
 class AcpEvidenceCollector:

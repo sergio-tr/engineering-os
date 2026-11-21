@@ -12,18 +12,18 @@ import re
 import subprocess
 
 from engineering_os.domain.models import new_id, utc_now
-from engineering_os.infrastructure.credential_provider import (
+from engineering_os.infrastructure.security.credentials.credential_provider import (
     CredentialLease,
     CredentialProvider,
     UnavailableCursorCredentialProvider,
     redact_secrets,
 )
-from engineering_os.infrastructure.cursor_runtime import CursorRuntimePlanner
-from engineering_os.infrastructure.egress_broker import (
+from engineering_os.infrastructure.runtime.cursor.cursor_runtime import CursorRuntimePlanner
+from engineering_os.infrastructure.network.broker.egress_broker import (
     broker_podman_args,
     cursor_proxy_compatibility,
 )
-from engineering_os.infrastructure.egress_enforcer import (
+from engineering_os.infrastructure.network.policy.egress_enforcer import (
     PastaAllowlistEgressPolicy,
     UdsBrokerEgressPolicy,
 )
@@ -31,20 +31,20 @@ from engineering_os.infrastructure.evidence import (
     CURSOR_ACP_LIVE,
     SYNTHETIC_IN_MEMORY,
 )
-from engineering_os.infrastructure.network_policy import NetworkPolicy, UnenforcedNetworkPolicy
-from engineering_os.infrastructure.oci_process import (
+from engineering_os.infrastructure.network.policy.network_policy import NetworkPolicy, UnenforcedNetworkPolicy
+from engineering_os.infrastructure.runtime.oci.oci_process import (
     InjectedFixtureProcess,
     OciProcessError,
     OciProcessHandle,
     SubprocessOciHandle,
 )
-from engineering_os.infrastructure.podman_executor import require_owner_execution_gates
-from engineering_os.infrastructure.runtime_authorization import (
+from engineering_os.infrastructure.runtime.oci.podman_executor import require_owner_execution_gates
+from engineering_os.infrastructure.security.authorization.runtime_authorization import (
     AuthorizationError,
     RuntimeAuthorization,
     RuntimeAuthorizationVerifier,
 )
-from engineering_os.infrastructure.sandbox_launcher import scan_argv_for_bypass
+from engineering_os.infrastructure.runtime.sandbox.sandbox_launcher import scan_argv_for_bypass
 
 
 ProcessFactory = Callable[["CursorLaunchRequest"], OciProcessHandle]

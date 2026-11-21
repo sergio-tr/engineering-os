@@ -17,20 +17,20 @@ import subprocess
 import tempfile
 
 from engineering_os.domain.models import new_id, utc_now
-from engineering_os.infrastructure.acp_fixture import FIXTURE_PROTOCOL_SUBSET, fixture_script_path
+from engineering_os.infrastructure.acp.acp_fixture import FIXTURE_PROTOCOL_SUBSET, fixture_script_path
 from engineering_os.infrastructure.evidence import (
     ERROR,
     SYNTHETIC_IN_MEMORY,
     SYNTHETIC_OCI_EXECUTED,
     UNAVAILABLE,
 )
-from engineering_os.infrastructure.oci_process import (
+from engineering_os.infrastructure.runtime.oci.oci_process import (
     InjectedFixtureProcess,
     OciProcessError,
     OciProcessHandle,
     SubprocessOciHandle,
 )
-from engineering_os.infrastructure.sandbox_launcher import scan_argv_for_bypass
+from engineering_os.infrastructure.runtime.sandbox.sandbox_launcher import scan_argv_for_bypass
 
 
 ProcessFactory = Callable[["FixtureLaunchRequest"], OciProcessHandle]

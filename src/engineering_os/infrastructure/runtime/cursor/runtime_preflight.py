@@ -5,14 +5,14 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 import shutil
 
-from engineering_os.infrastructure.credential_provider import CredentialProvider
-from engineering_os.infrastructure.cursor_image import load_image_evidence, inspect_image_definition
-from engineering_os.infrastructure.cursor_runtime import CursorRuntimePlanner
+from engineering_os.infrastructure.security.credentials.credential_provider import CredentialProvider
+from engineering_os.infrastructure.runtime.cursor.cursor_image import load_image_evidence, inspect_image_definition
+from engineering_os.infrastructure.runtime.cursor.cursor_runtime import CursorRuntimePlanner
 from engineering_os.infrastructure.evidence import ERROR, SYNTHETIC, UNAVAILABLE
-from engineering_os.infrastructure.network_policy import NetworkPolicy
-from engineering_os.infrastructure.podman_executor import probe_podman_runtime
-from engineering_os.infrastructure.runtime_authorization import RuntimeAuthorizationVerifier
-from engineering_os.infrastructure.workspace_prep import WorkspacePreparer
+from engineering_os.infrastructure.network.policy.network_policy import NetworkPolicy
+from engineering_os.infrastructure.runtime.oci.podman_executor import probe_podman_runtime
+from engineering_os.infrastructure.security.authorization.runtime_authorization import RuntimeAuthorizationVerifier
+from engineering_os.infrastructure.runtime.cursor.workspace_prep import WorkspacePreparer
 
 
 EVIDENCE_STATIC = "STATIC_VALIDATED"

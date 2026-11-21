@@ -12,12 +12,12 @@ from typing import Any, Dict, List, Optional, Sequence
 
 from engineering_os.domain.models import new_id, utc_now
 from engineering_os.infrastructure.evidence import ERROR, SYNTHETIC, UNAVAILABLE
-from engineering_os.infrastructure.runtime_authorization import (
+from engineering_os.infrastructure.security.authorization.runtime_authorization import (
     AuthorizationError,
     RuntimeAuthorization,
     RuntimeAuthorizationVerifier,
 )
-from engineering_os.infrastructure.sandbox_spec import (
+from engineering_os.infrastructure.runtime.sandbox.sandbox_spec import (
     SandboxExecutionSpec,
     SandboxSpecValidationError,
     validate_sandbox_spec,

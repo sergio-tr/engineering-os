@@ -24,7 +24,7 @@ from engineering_os.infrastructure.adapters import (
     DispatchRequest,
     SyntheticExecutionAdapter,
 )
-from engineering_os.infrastructure.sqlite_repo import ConcurrencyError, Repository
+from engineering_os.infrastructure.persistence.sqlite import ConcurrencyError, Repository
 from engineering_os.interfaces.http_server import AppState, make_handler
 from http.server import ThreadingHTTPServer
 

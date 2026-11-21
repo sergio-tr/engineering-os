@@ -408,7 +408,7 @@ class SequentialOrchestrator:
           SYNTHETIC_OCI_EXECUTED — OCI fixture path (injected offline by default)
           CURSOR_ACP_LIVE — requires Cursor auth + egress + Owner gates (blocked here)
         """
-        from engineering_os.infrastructure.cursor_bridge import RUNTIME_MODES
+        from engineering_os.infrastructure.runtime.cursor.cursor_bridge import RUNTIME_MODES
         from engineering_os.infrastructure.evidence import (
             CURSOR_ACP_LIVE,
             SYNTHETIC_IN_MEMORY,

@@ -5,50 +5,50 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from engineering_os.domain.models import new_id, utc_now
-from engineering_os.infrastructure.acp_session import AcpSessionManager
-from engineering_os.infrastructure.acp_transport import (
+from engineering_os.infrastructure.acp.sessions.acp_session import AcpSessionManager
+from engineering_os.infrastructure.acp.transports.acp_transport import (
     CursorAcpAdapter,
     InMemoryAcpTransport,
 )
-from engineering_os.infrastructure.acpx_cursor_config import (
+from engineering_os.infrastructure.acp.acpx.acpx_cursor_config import (
     propose_acpx_cursor_agent_config,
     validate_acpx_cursor_command,
 )
-from engineering_os.infrastructure.credential_provider import (
+from engineering_os.infrastructure.security.credentials.credential_provider import (
     CredentialProvider,
     UnavailableCursorCredentialProvider,
     redact_secrets,
 )
-from engineering_os.infrastructure.cursor_image import (
+from engineering_os.infrastructure.runtime.cursor.cursor_image import (
     build_plan,
     inspect_image_definition,
     verify_image_identity,
 )
-from engineering_os.infrastructure.cursor_launcher import (
+from engineering_os.infrastructure.runtime.cursor.cursor_launcher import (
     CursorAcpLauncher,
     CursorLaunchRequest,
     default_cursor_injected_factory,
 )
-from engineering_os.infrastructure.cursor_runtime import CursorRuntimePlanner
+from engineering_os.infrastructure.runtime.cursor.cursor_runtime import CursorRuntimePlanner
 from engineering_os.infrastructure.evidence import (
     ERROR,
     SYNTHETIC,
     SYNTHETIC_IN_MEMORY,
 )
-from engineering_os.infrastructure.network_policy import (
+from engineering_os.infrastructure.network.policy.network_policy import (
     NetworkPolicy,
     UnenforcedNetworkPolicy,
 )
-from engineering_os.infrastructure.oci_acp_transport import OciAcpStdioTransport
-from engineering_os.infrastructure.oci_process import InjectedFixtureProcess
-from engineering_os.infrastructure.runtime_authorization import (
+from engineering_os.infrastructure.runtime.oci.oci_acp_transport import OciAcpStdioTransport
+from engineering_os.infrastructure.runtime.oci.oci_process import InjectedFixtureProcess
+from engineering_os.infrastructure.security.authorization.runtime_authorization import (
     AuthorizationError,
     RuntimeAuthorization,
     RuntimeAuthorizationVerifier,
 )
-from engineering_os.infrastructure.runtime_preflight import CursorRuntimePreflight
-from engineering_os.infrastructure.sqlite_repo import Repository
-from engineering_os.infrastructure.workspace_prep import WorkspacePreparer, WorkspaceSpec
+from engineering_os.infrastructure.runtime.cursor.runtime_preflight import CursorRuntimePreflight
+from engineering_os.infrastructure.persistence.sqlite import Repository
+from engineering_os.infrastructure.runtime.cursor.workspace_prep import WorkspacePreparer, WorkspaceSpec
 
 
 RUNTIME_MODES = (
@@ -406,7 +406,7 @@ class CursorBridge:
             prompt_text="EOS-10 synthetic Cursor ACP prompt",
             mode="SYNTHETIC",
         )
-        from engineering_os.infrastructure.acp_protocol import (
+        from engineering_os.infrastructure.acp.protocol.acp_protocol import (
             initialize_params,
             make_request,
         )

@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional
 from engineering_os.domain.models import utc_now
 from engineering_os.infrastructure.adapters import OrganizationAdapter
 from engineering_os.infrastructure.evidence import ERROR, LIVE_READ_ONLY, UNAVAILABLE
-from engineering_os.infrastructure.paperclip_client import (
+from engineering_os.infrastructure.integrations.paperclip.paperclip_client import (
     PaperclipClient,
     PaperclipClientError,
 )

@@ -18,19 +18,19 @@ from engineering_os.infrastructure.evidence import (
     EXTERNALLY_VERIFIED,
     LIVE_READ_ONLY,
 )
-from engineering_os.infrastructure.github_adapter import GitHubReadOnlyRepositoryAdapter
-from engineering_os.infrastructure.github_client import (
+from engineering_os.infrastructure.integrations.github.github_adapter import GitHubReadOnlyRepositoryAdapter
+from engineering_os.infrastructure.integrations.github.github_client import (
     FixtureTransport,
     GitHubClientError,
     GitHubReadOnlyClient,
     HttpResponse,
     parse_repository,
 )
-from engineering_os.infrastructure.github_fixtures import (
+from engineering_os.infrastructure.integrations.github.github_fixtures import (
     build_demo_fixture_transport,
     build_open_pr_transport,
 )
-from engineering_os.infrastructure.sqlite_repo import Repository
+from engineering_os.infrastructure.persistence.sqlite import Repository
 
 
 def _tmp() -> Path:

@@ -19,21 +19,21 @@ sys.path.insert(0, str(ROOT / "src"))
 from engineering_os.application.orchestrator import SequentialOrchestrator
 from engineering_os.application.services import ControlPlane
 from engineering_os.domain.states import IllegalTransitionError
-from engineering_os.infrastructure.acp_protocol import (
+from engineering_os.infrastructure.acp.protocol.acp_protocol import (
     AcpProtocolError,
     make_request,
     parse_message,
 )
-from engineering_os.infrastructure.acp_session import AcpSessionManager
-from engineering_os.infrastructure.acp_states import assert_acp_transition
-from engineering_os.infrastructure.acp_transport import (
+from engineering_os.infrastructure.acp.sessions.acp_session import AcpSessionManager
+from engineering_os.infrastructure.acp.protocol.acp_states import assert_acp_transition
+from engineering_os.infrastructure.acp.transports.acp_transport import (
     AcpTransportError,
     CursorAcpAdapter,
     DisabledLiveAcpTransport,
     InMemoryAcpTransport,
     OpenClawAcpxExecutionTransport,
 )
-from engineering_os.infrastructure.sqlite_repo import Repository
+from engineering_os.infrastructure.persistence.sqlite import Repository
 from engineering_os.interfaces.http_server import AppState, make_handler
 
 

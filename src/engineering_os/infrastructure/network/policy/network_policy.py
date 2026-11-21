@@ -107,7 +107,7 @@ class FixtureAllowlistNetworkPolicy(NetworkPolicy):
         }
 
     def evaluate(self, destination: str) -> NetworkDecision:
-        from engineering_os.infrastructure.egress_enforcer import is_ip_literal
+        from engineering_os.infrastructure.network.policy.egress_enforcer import is_ip_literal
 
         host = destination.lower().split("/")[0]
         if "://" in host:

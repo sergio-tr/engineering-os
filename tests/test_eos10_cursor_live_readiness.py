@@ -15,43 +15,43 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from engineering_os.application.orchestrator import SequentialOrchestrator
 from engineering_os.application.services import ControlPlane
-from engineering_os.infrastructure.credential_provider import (
+from engineering_os.infrastructure.security.credentials.credential_provider import (
     FixtureCursorCredentialProvider,
     OwnerEnvFileCredentialProvider,
     UnavailableCursorCredentialProvider,
     assert_no_secret_leak,
     redact_secrets,
 )
-from engineering_os.infrastructure.cursor_bridge import CursorBridge
-from engineering_os.infrastructure.cursor_image import build_plan, inspect_image_definition, verify_image_identity
-from engineering_os.infrastructure.cursor_launcher import (
+from engineering_os.infrastructure.runtime.cursor.cursor_bridge import CursorBridge
+from engineering_os.infrastructure.runtime.cursor.cursor_image import build_plan, inspect_image_definition, verify_image_identity
+from engineering_os.infrastructure.runtime.cursor.cursor_launcher import (
     CursorAcpLauncher,
     CursorLaunchRequest,
     build_cursor_podman_argv,
     default_cursor_injected_factory,
 )
-from engineering_os.infrastructure.cursor_runtime import CursorRuntimePlanner
-from engineering_os.infrastructure.egress_enforcer import (
+from engineering_os.infrastructure.runtime.cursor.cursor_runtime import CursorRuntimePlanner
+from engineering_os.infrastructure.network.policy.egress_enforcer import (
     FailClosedEgressPolicy,
     PastaAllowlistEgressPolicy,
     is_ip_literal,
 )
-from engineering_os.infrastructure.network_policy import FixtureAllowlistNetworkPolicy
-from engineering_os.infrastructure.oci_acp_transport import OciAcpStdioTransport
-from engineering_os.infrastructure.oci_process import (
+from engineering_os.infrastructure.network.policy.network_policy import FixtureAllowlistNetworkPolicy
+from engineering_os.infrastructure.runtime.oci.oci_acp_transport import OciAcpStdioTransport
+from engineering_os.infrastructure.runtime.oci.oci_process import (
     InjectedFixtureProcess,
     TERMINATION_SIGKILL,
     TERMINATION_STDIN_CLOSED,
     TERMINATION_SIGTERM,
     classify_exit,
 )
-from engineering_os.infrastructure.runtime_authorization import (
+from engineering_os.infrastructure.security.authorization.runtime_authorization import (
     AuthorizationError,
     RuntimeAuthorization,
     RuntimeAuthorizationVerifier,
 )
-from engineering_os.infrastructure.runtime_preflight import CursorRuntimePreflight
-from engineering_os.infrastructure.workspace_prep import WorkspacePreparer
+from engineering_os.infrastructure.runtime.cursor.runtime_preflight import CursorRuntimePreflight
+from engineering_os.infrastructure.runtime.cursor.workspace_prep import WorkspacePreparer
 
 
 class LifecycleTests(unittest.TestCase):
@@ -160,7 +160,7 @@ class CredentialTests(unittest.TestCase):
 
 class NetworkTests(unittest.TestCase):
     def test_pasta_policy_never_enforced(self) -> None:
-        from engineering_os.infrastructure.podman_capabilities import PodmanCapabilities
+        from engineering_os.infrastructure.runtime.oci.podman_capabilities import PodmanCapabilities
 
         caps = PodmanCapabilities(
             podman_path="/usr/bin/podman",

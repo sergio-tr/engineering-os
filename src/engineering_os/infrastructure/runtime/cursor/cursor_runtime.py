@@ -92,7 +92,7 @@ class CursorRuntimePlanner:
         self.available_binaries = list(available_binaries or [])
 
     def image_plan(self) -> Dict[str, Any]:
-        from engineering_os.infrastructure.cursor_image import build_plan
+        from engineering_os.infrastructure.runtime.cursor.cursor_image import build_plan
 
         plan = build_plan()
         return {

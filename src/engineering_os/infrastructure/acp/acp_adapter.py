@@ -9,8 +9,8 @@ from engineering_os.infrastructure.adapters import (
     DispatchResult,
     ExecutionAdapter,
 )
-from engineering_os.infrastructure.acp_session import AcpSessionManager
-from engineering_os.infrastructure.acp_transport import (
+from engineering_os.infrastructure.acp.sessions.acp_session import AcpSessionManager
+from engineering_os.infrastructure.acp.transports.acp_transport import (
     AcpTransport,
     CursorAcpAdapter,
     DisabledLiveAcpTransport,
@@ -18,7 +18,7 @@ from engineering_os.infrastructure.acp_transport import (
     OpenClawAcpxExecutionTransport,
 )
 from engineering_os.infrastructure.evidence import SYNTHETIC
-from engineering_os.infrastructure.sqlite_repo import Repository
+from engineering_os.infrastructure.persistence.sqlite import Repository
 
 
 class AcpExecutionAdapter(ExecutionAdapter):

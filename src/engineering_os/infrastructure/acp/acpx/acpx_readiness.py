@@ -7,8 +7,8 @@ from typing import Any, Dict, List, Optional
 
 from engineering_os.domain.models import utc_now
 from engineering_os.infrastructure.evidence import ERROR, SYNTHETIC, UNAVAILABLE
-from engineering_os.infrastructure.gateway_client import OpenClawGatewayClient
-from engineering_os.infrastructure.sandbox_launcher import SandboxLauncher
+from engineering_os.infrastructure.integrations.openclaw.gateway_client import OpenClawGatewayClient
+from engineering_os.infrastructure.runtime.sandbox.sandbox_launcher import SandboxLauncher
 
 
 @dataclass

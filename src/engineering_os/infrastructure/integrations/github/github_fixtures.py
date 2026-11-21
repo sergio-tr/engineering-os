@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any, Dict
 
-from engineering_os.infrastructure.github_client import FixtureTransport, HttpResponse
+from engineering_os.infrastructure.integrations.github.github_client import FixtureTransport, HttpResponse
 
 
 def _json(data: Any, *, status: int = 200, extra_headers: Dict[str, str] | None = None) -> HttpResponse:

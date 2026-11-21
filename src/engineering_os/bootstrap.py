@@ -15,29 +15,29 @@ from engineering_os.infrastructure.adapters import (
     SimulatedRepositoryIntegrationAdapter,
     SyntheticExecutionAdapter,
 )
-from engineering_os.infrastructure.acp_adapter import AcpExecutionAdapter
-from engineering_os.infrastructure.acpx_bridge import AcpxSandboxBridge
-from engineering_os.infrastructure.credential_provider import (
+from engineering_os.infrastructure.acp.acp_adapter import AcpExecutionAdapter
+from engineering_os.infrastructure.acp.acpx.acpx_bridge import AcpxSandboxBridge
+from engineering_os.infrastructure.security.credentials.credential_provider import (
     UnavailableCursorCredentialProvider,
 )
-from engineering_os.infrastructure.cursor_bridge import CursorBridge
-from engineering_os.infrastructure.cursor_runtime import CursorRuntimePlanner
-from engineering_os.infrastructure.gateway_client import (
+from engineering_os.infrastructure.runtime.cursor.cursor_bridge import CursorBridge
+from engineering_os.infrastructure.runtime.cursor.cursor_runtime import CursorRuntimePlanner
+from engineering_os.infrastructure.integrations.openclaw.gateway_client import (
     OpenClawGatewayClient,
     default_gateway_client,
 )
-from engineering_os.infrastructure.github_client import DEFAULT_API_BASE, HttpTransport
-from engineering_os.infrastructure.network_policy import UnenforcedNetworkPolicy
-from engineering_os.infrastructure.openclaw_adapter import OpenClawCoordinatorAdapter
-from engineering_os.infrastructure.openclaw_client import OpenClawCliClient
-from engineering_os.infrastructure.paperclip_client import DEFAULT_PAPERCLIP_URL
-from engineering_os.infrastructure.podman_executor import (
+from engineering_os.infrastructure.integrations.github.github_client import DEFAULT_API_BASE, HttpTransport
+from engineering_os.infrastructure.network.policy.network_policy import UnenforcedNetworkPolicy
+from engineering_os.infrastructure.integrations.openclaw.openclaw_adapter import OpenClawCoordinatorAdapter
+from engineering_os.infrastructure.integrations.openclaw.openclaw_client import OpenClawCliClient
+from engineering_os.infrastructure.integrations.paperclip.paperclip_client import DEFAULT_PAPERCLIP_URL
+from engineering_os.infrastructure.runtime.oci.podman_executor import (
     PodmanSandboxExecutor,
     default_injected_factory,
 )
-from engineering_os.infrastructure.sandbox_launcher import PodmanAcpSandboxLauncher
-from engineering_os.infrastructure.sqlite_repo import Repository, default_db_path
-from engineering_os.infrastructure.workspace_prep import WorkspacePreparer
+from engineering_os.infrastructure.runtime.sandbox.sandbox_launcher import PodmanAcpSandboxLauncher
+from engineering_os.infrastructure.persistence.sqlite import Repository, default_db_path
+from engineering_os.infrastructure.runtime.cursor.workspace_prep import WorkspacePreparer
 
 
 def build_dependencies(
