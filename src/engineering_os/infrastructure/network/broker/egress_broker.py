@@ -19,7 +19,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+import errno
 import os
 import select
 import socket
@@ -28,13 +29,47 @@ import tempfile
 import threading
 import time
 
-from engineering_os.domain.models import utc_now
+from engineering_os.domain.models import new_id, utc_now
 from engineering_os.infrastructure.network.policy.egress_enforcer import (
     DEFAULT_CURSOR_DESTINATIONS,
     is_ip_literal,
     is_private_or_link_local,
 )
 from engineering_os.infrastructure.evidence import ERROR, SYNTHETIC, UNAVAILABLE
+
+
+# Broker lifecycle event codes (EOS-12.2).
+EVT_CONNECT_RECEIVED = "CONNECT_RECEIVED"
+EVT_DESTINATION_ALLOWED = "DESTINATION_ALLOWED"
+EVT_DESTINATION_DENIED = "DESTINATION_DENIED"
+EVT_DNS_RESOLVED = "DNS_RESOLVED"
+EVT_DNS_REJECTED = "DNS_REJECTED"
+EVT_UPSTREAM_CONNECT_STARTED = "UPSTREAM_CONNECT_STARTED"
+EVT_UPSTREAM_CONNECT_FAILED = "UPSTREAM_CONNECT_FAILED"
+EVT_UPSTREAM_CONNECTED = "UPSTREAM_CONNECTED"
+EVT_TUNNEL_ESTABLISHED = "TUNNEL_ESTABLISHED"
+EVT_TUNNEL_BYTES_TRANSFERRED = "TUNNEL_BYTES_TRANSFERRED"
+EVT_TUNNEL_CLOSED = "TUNNEL_CLOSED"
+EVT_TUNNEL_TIMEOUT = "TUNNEL_TIMEOUT"
+EVT_TUNNEL_ERROR = "TUNNEL_ERROR"
+
+
+def classify_connect_error(exc: BaseException) -> str:
+    if isinstance(exc, TimeoutError):
+        return "timeout"
+    if not isinstance(exc, OSError):
+        return f"error:{type(exc).__name__}"
+    err = exc.errno
+    mapping = {
+        errno.ECONNREFUSED: "connection_refused",
+        errno.ENETUNREACH: "network_unreachable",
+        errno.EHOSTUNREACH: "host_unreachable",
+        errno.ETIMEDOUT: "timeout",
+        errno.ECONNRESET: "connection_reset",
+    }
+    if err in mapping:
+        return mapping[err]
+    return f"os_error:{err}"
 
 
 class EgressBrokerError(RuntimeError):
@@ -52,13 +87,21 @@ ResolveFn = Callable[[str], List[str]]
 
 
 def default_resolve(host: str) -> List[str]:
-    """Real DNS — not used in automated tests."""
-    infos = socket.getaddrinfo(host, None)
+    """Real DNS — not used in automated tests.
+
+    Raises OSError subclasses with clear context on total failure.
+    """
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except socket.gaierror as exc:
+        raise OSError(f"dns_lookup_failed:{exc}") from exc
     addrs: List[str] = []
     for info in infos:
         addr = info[4][0]
         if addr not in addrs:
             addrs.append(addr)
+    if not addrs:
+        raise OSError("dns_no_usable_addresses")
     return addrs
 
 
@@ -88,12 +131,13 @@ def live_open_upstream(
         return None, "no_pinned_addrs"
     last_err = "connect_failed"
     for addr in pinned:
+        family = "ipv6" if ":" in addr else "ipv4"
         try:
             sock = socket.create_connection((addr, int(port)), timeout=timeout)
-            return sock, f"connected:{addr}"
+            return sock, f"connected:{family}:{addr}"
         except OSError as exc:
-            last_err = f"connect_failed:{exc}"
-    return None, last_err
+            last_err = f"{family}:{classify_connect_error(exc)}:{addr}"
+    return None, f"upstream_connect_failed:{last_err}"
 
 
 def _adapt_connect_fn(fn: Callable[..., Any]) -> OpenUpstreamFn:
@@ -247,6 +291,7 @@ class TrustedEgressBroker:
         self.socket_path = socket_path
         self._observations: List[Dict[str, Any]] = []
         self._tunnel_stats: List[Dict[str, Any]] = []
+        self._events: List[Dict[str, Any]] = []
         self._lock = threading.RLock()
         self._server: Optional[socketserver.ThreadingUnixStreamServer] = None
         self._thread: Optional[threading.Thread] = None
@@ -285,10 +330,17 @@ class TrustedEgressBroker:
         }
 
     def evaluate_destination(self, host: str, port: int = 443) -> BrokerDecision:
-        host_l = host.lower().strip().strip("[]")
-        if "://" in host_l:
-            host_l = host_l.split("://", 1)[1]
-        host_l = host_l.split("@")[-1].split("/")[0].split(":")[0]
+        raw = host.lower().strip()
+        if raw.startswith("[") and "]" in raw:
+            host_l = raw[1 : raw.index("]")]
+        else:
+            host_l = raw
+            if "://" in host_l:
+                host_l = host_l.split("://", 1)[1]
+            host_l = host_l.split("@")[-1].split("/")[0]
+            # Strip :port only for hostname / IPv4 forms — never mutilate IPv6.
+            if not is_ip_literal(host_l) and host_l.count(":") == 1:
+                host_l = host_l.rsplit(":", 1)[0]
 
         if self._crashed:
             decision = BrokerDecision(False, host_l, port, "broker_crashed")
@@ -308,6 +360,12 @@ class TrustedEgressBroker:
                 except Exception as exc:  # noqa: BLE001
                     decision = BrokerDecision(
                         False, host_l, port, f"dns_failed:{exc}", resolved
+                    )
+                    self._observe(decision)
+                    return decision
+                if not resolved:
+                    decision = BrokerDecision(
+                        False, host_l, port, "dns_no_usable_addresses", resolved
                     )
                     self._observe(decision)
                     return decision
@@ -338,6 +396,29 @@ class TrustedEgressBroker:
                 {**decision.to_dict(), "observed_at": utc_now()}
             )
 
+    def emit_event(
+        self,
+        code: str,
+        *,
+        request_id: str,
+        host: str = "",
+        port: int = 0,
+        ok: bool = True,
+        detail: str = "",
+    ) -> None:
+        with self._lock:
+            self._events.append(
+                {
+                    "code": code,
+                    "request_id": request_id,
+                    "host": host,
+                    "port": port,
+                    "ok": ok,
+                    "detail": detail[:240],
+                    "observed_at": utc_now(),
+                }
+            )
+
     def observations(self) -> List[Dict[str, Any]]:
         with self._lock:
             return list(self._observations)
@@ -345,6 +426,10 @@ class TrustedEgressBroker:
     def tunnel_stats(self) -> List[Dict[str, Any]]:
         with self._lock:
             return list(self._tunnel_stats)
+
+    def tunnel_events(self) -> List[Dict[str, Any]]:
+        with self._lock:
+            return list(self._events)
 
     def mark_crashed(self) -> None:
         self._crashed = True
@@ -473,6 +558,9 @@ class TrustedEgressBroker:
 
     def _handle_client(self, client_sock: socket.socket) -> None:
         upstream: Optional[socket.socket] = None
+        # Broker-generated correlation id (client X-EOS-Request-Id is advisory only).
+        request_id = new_id("breq")
+        client_req_id = ""
 
         def reply(payload: bytes) -> None:
             client_sock.sendall(payload)
@@ -499,6 +587,10 @@ class TrustedEgressBroker:
                 hdr = self._recv_line(client_sock)
                 if not hdr or hdr in (b"\r\n", b"\n"):
                     break
+                hdr_s = hdr.decode("utf-8", errors="replace")
+                if hdr_s.lower().startswith("x-eos-request-id:"):
+                    # Recorded for correlation only — never used as authorization.
+                    client_req_id = hdr_s.split(":", 1)[1].strip()[:80]
 
             # Fail closed: only CONNECT tunnels are supported for HTTPS egress.
             if method != "CONNECT":
@@ -511,7 +603,15 @@ class TrustedEgressBroker:
 
             host = ""
             port = 443
-            if ":" in target:
+            if target.startswith("[") and "]:" in target:
+                bracket, port_s = target.rsplit("]:", 1)
+                host = bracket[1:]
+                try:
+                    port = int(port_s)
+                except ValueError:
+                    reply(b"HTTP/1.1 400 Bad Port\r\n\r\n")
+                    return
+            elif target.count(":") == 1 and not target.startswith(":"):
                 host, port_s = target.rsplit(":", 1)
                 try:
                     port = int(port_s)
@@ -519,17 +619,68 @@ class TrustedEgressBroker:
                     reply(b"HTTP/1.1 400 Bad Port\r\n\r\n")
                     return
             else:
-                host, port = target, 443
+                host, port = target.strip("[]"), 443
+
+            self.emit_event(
+                EVT_CONNECT_RECEIVED,
+                request_id=request_id,
+                host=host,
+                port=port,
+                detail=f"client_req_id={client_req_id or '-'}",
+            )
 
             decision = self.evaluate_destination(host, port)
+            if decision.reason.startswith("dns_"):
+                self.emit_event(
+                    EVT_DNS_REJECTED,
+                    request_id=request_id,
+                    host=decision.host,
+                    port=decision.port,
+                    ok=False,
+                    detail=decision.reason,
+                )
+            elif decision.allowed and decision.resolved_addrs:
+                self.emit_event(
+                    EVT_DNS_RESOLVED,
+                    request_id=request_id,
+                    host=decision.host,
+                    port=decision.port,
+                    detail=f"addrs={len(decision.resolved_addrs)}",
+                )
+
             if not decision.allowed:
+                self.emit_event(
+                    EVT_DESTINATION_DENIED,
+                    request_id=request_id,
+                    host=decision.host,
+                    port=decision.port,
+                    ok=False,
+                    detail=decision.reason,
+                )
                 reply(
-                    f"HTTP/1.1 403 Forbidden\r\nX-EOS-Deny: {decision.reason}\r\n\r\n".encode(
-                        "utf-8"
-                    )
+                    (
+                        f"HTTP/1.1 403 Forbidden\r\n"
+                        f"X-EOS-Deny: {decision.reason}\r\n"
+                        f"X-EOS-Request-Id: {request_id}\r\n"
+                        f"\r\n"
+                    ).encode("utf-8")
                 )
                 return
 
+            self.emit_event(
+                EVT_DESTINATION_ALLOWED,
+                request_id=request_id,
+                host=decision.host,
+                port=decision.port,
+                detail=decision.reason,
+            )
+            self.emit_event(
+                EVT_UPSTREAM_CONNECT_STARTED,
+                request_id=request_id,
+                host=decision.host,
+                port=decision.port,
+                detail=f"pinned={len(decision.resolved_addrs)}",
+            )
             upstream, reason = self.open_upstream_fn(
                 decision.host,
                 decision.port,
@@ -537,15 +688,59 @@ class TrustedEgressBroker:
                 decision.resolved_addrs,
             )
             if upstream is None:
+                self.emit_event(
+                    EVT_UPSTREAM_CONNECT_FAILED,
+                    request_id=request_id,
+                    host=decision.host,
+                    port=decision.port,
+                    ok=False,
+                    detail=reason,
+                )
                 reply(
-                    f"HTTP/1.1 502 Bad Gateway\r\nX-EOS-Deny: {reason}\r\n\r\n".encode(
-                        "utf-8"
-                    )
+                    (
+                        f"HTTP/1.1 502 Bad Gateway\r\n"
+                        f"X-EOS-Deny: {reason}\r\n"
+                        f"X-EOS-Request-Id: {request_id}\r\n"
+                        f"\r\n"
+                    ).encode("utf-8")
                 )
                 return
 
+            self.emit_event(
+                EVT_UPSTREAM_CONNECTED,
+                request_id=request_id,
+                host=decision.host,
+                port=decision.port,
+                detail=reason,
+            )
             # Never advertise CONNECT success without a live upstream socket.
-            reply(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+            reply(
+                (
+                    f"HTTP/1.1 200 Connection Established\r\n"
+                    f"X-EOS-Request-Id: {request_id}\r\n"
+                    f"\r\n"
+                ).encode("utf-8")
+            )
+            self.emit_event(
+                EVT_TUNNEL_ESTABLISHED,
+                request_id=request_id,
+                host=decision.host,
+                port=decision.port,
+            )
+            with self._lock:
+                self._tunnel_stats.append(
+                    {
+                        "request_id": request_id,
+                        "host": decision.host,
+                        "port": decision.port,
+                        "pinned_addrs": list(decision.resolved_addrs),
+                        "bytes": 0,
+                        "reason": "established",
+                        "observed_at": utc_now(),
+                    }
+                )
+                stats_index = len(self._tunnel_stats) - 1
+
             stats = forward_bidirectional(
                 client_sock,
                 upstream,
@@ -553,16 +748,30 @@ class TrustedEgressBroker:
                 max_bytes=self.max_tunnel_bytes,
             )
             upstream = None  # closed inside forward_bidirectional
+            close_code = EVT_TUNNEL_CLOSED
+            if stats.get("reason") == "deadline_exceeded":
+                close_code = EVT_TUNNEL_TIMEOUT
+            elif stats.get("reason") not in {"ok", "peer_closed"}:
+                close_code = EVT_TUNNEL_ERROR
+            self.emit_event(
+                EVT_TUNNEL_BYTES_TRANSFERRED,
+                request_id=request_id,
+                host=decision.host,
+                port=decision.port,
+                detail=f"bytes={stats.get('bytes', 0)}",
+            )
+            self.emit_event(
+                close_code,
+                request_id=request_id,
+                host=decision.host,
+                port=decision.port,
+                ok=close_code == EVT_TUNNEL_CLOSED,
+                detail=str(stats.get("reason")),
+            )
             with self._lock:
-                self._tunnel_stats.append(
-                    {
-                        "host": decision.host,
-                        "port": decision.port,
-                        "pinned_addrs": list(decision.resolved_addrs),
-                        **stats,
-                        "observed_at": utc_now(),
-                    }
-                )
+                if 0 <= stats_index < len(self._tunnel_stats):
+                    self._tunnel_stats[stats_index].update(stats)
+                    self._tunnel_stats[stats_index]["closed_at"] = utc_now()
         finally:
             if upstream is not None:
                 try:
@@ -576,8 +785,8 @@ class TrustedEgressBroker:
 def write_tcp_uds_relay_script(path: Path) -> Path:
     """Write TCP→UDS relay used inside --network=none containers.
 
-    Requires python3 in the selected image. The workload preflight fails closed
-    with EOS_RELAY_MISSING_RUNTIME when python3 is absent.
+    Requires python3 in the selected image. Emits EOS_RELAY_READY on stdout
+    after binding and verifying UDS reachability.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     script = '''#!/usr/bin/env python3
@@ -608,20 +817,33 @@ def pipe(a, b):
 
 def handle(client):
     upstream = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    upstream.connect(UDS)
+    try:
+        upstream.connect(UDS)
+    except OSError as exc:
+        try: client.close()
+        except Exception: pass
+        try: upstream.close()
+        except Exception: pass
+        print(f"EOS_RELAY_UDS_ERROR {exc}", flush=True)
+        return
     t1 = threading.Thread(target=pipe, args=(client, upstream), daemon=True)
     t2 = threading.Thread(target=pipe, args=(upstream, client), daemon=True)
     t1.start(); t2.start(); t1.join(); t2.join()
 
 def main():
+    # Fail closed if broker UDS is not reachable before advertising readiness.
+    probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        probe.connect(UDS)
+        probe.close()
+    except OSError as exc:
+        print(f"EOS_RELAY_UDS_UNAVAILABLE {exc}", flush=True)
+        raise SystemExit(2)
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     srv.bind(("127.0.0.1", PORT))
     srv.listen(32)
-    if len(sys.argv) > 1:
-        import subprocess
-        threading.Thread(target=lambda: [handle(c) for c,_ in iter(srv.accept, None)], daemon=True).start()
-        raise SystemExit(subprocess.call(sys.argv[1:]))
+    print(f"EOS_RELAY_READY {PORT}", flush=True)
     while True:
         c, _ = srv.accept()
         threading.Thread(target=handle, args=(c,), daemon=True).start()

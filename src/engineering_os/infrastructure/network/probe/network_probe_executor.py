@@ -112,6 +112,10 @@ class NetworkProbeResult:
     container_observations: Dict[str, str] = field(default_factory=dict)
     prerequisites: Dict[str, Any] = field(default_factory=dict)
     image_identity: Dict[str, Any] = field(default_factory=dict)
+    allowed_path: Dict[str, Any] = field(default_factory=dict)
+    denied_paths: List[Dict[str, Any]] = field(default_factory=list)
+    tunnel_events: List[Dict[str, Any]] = field(default_factory=list)
+    probe_events: List[Dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -136,6 +140,10 @@ class NetworkProbeResult:
             "container_observations": dict(self.container_observations),
             "prerequisites": dict(self.prerequisites),
             "image_identity": dict(self.image_identity),
+            "allowed_path": dict(self.allowed_path),
+            "denied_paths": list(self.denied_paths),
+            "tunnel_events": list(self.tunnel_events),
+            "probe_events": list(self.probe_events),
             "live_cursor_acp": False,
         }
 
@@ -170,89 +178,193 @@ def probe_prerequisites(
 
 
 def write_probe_workload_script(path: Path) -> Path:
-    """Pure-Python probe workload — no wget/nc dependency."""
+    """EOS-12.2 workload: staged CONNECT/TLS probe + broker-correlated denials."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    # Accept .py or legacy .sh path names from callers.
     if path.suffix == ".sh":
         path = path.with_suffix(".py")
     script = r'''#!/usr/bin/env python3
-"""EOS-12.1 network probe workload — stdlib only, proxy-only, evidence-strict."""
+"""EOS-12.2 network probe workload — staged HTTPS-through-CONNECT diagnostics."""
 from __future__ import annotations
 import os
 import socket
 import subprocess
 import sys
 import time
-import urllib.error
-import urllib.request
+import uuid
 
-PROXY = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY") or "http://127.0.0.1:18080"
+sys.path.insert(0, "/probe")
+from transport import (  # type: ignore  # noqa: E402
+    STAGE_RELAY_PROCESS_STARTED,
+    STAGE_RELAY_TCP_LISTENING,
+    STAGE_UDS_BROKER_REACHABLE,
+    classify_os_error,
+    format_probe_lines,
+    https_connect_probe,
+    wait_tcp_ready,
+)
+
 RELAY = "/runtime/egress/relay.py"
+UDS = os.environ.get("EOS_EGRESS_UDS", "/runtime/egress/broker.sock")
+PORT = int(os.environ.get("EOS_EGRESS_RELAY_PORT", "18080"))
 
 
-def report(case: str, outcome: str, detail: str) -> None:
-    print(f"PROBE_RESULT {case} {outcome} {detail}", flush=True)
+def emit(line: str) -> None:
+    print(line, flush=True)
 
 
-def via_proxy(url: str, timeout: float = 8.0) -> None:
-    handler = urllib.request.ProxyHandler({"http": PROXY, "https": PROXY})
-    opener = urllib.request.build_opener(handler)
-    opener.open(url, timeout=timeout).read(64)
+def report(case: str, outcome: str, detail: str, req: str = "-") -> None:
+    emit(f"PROBE_RESULT {case} {outcome} {detail} {req}")
+
+
+def event(case: str, code: str, ok: bool, detail: str, req: str = "-") -> None:
+    emit(f"PROBE_EVENT {case} {code} {'ok' if ok else 'fail'} {(detail or '-')[:120]} {req}")
 
 
 def main() -> int:
     if not os.path.isfile(RELAY):
         report("relay_script", "missing", "path")
-        print("PROBE_DONE", flush=True)
+        emit("PROBE_DONE")
+        return 1
+    if not os.path.isfile("/probe/transport.py"):
+        report("transport_module", "missing", "path")
+        emit("PROBE_DONE")
         return 1
 
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.bind(("127.0.0.1", 0))
         s.close()
-    except OSError:
-        report("loopback", "failed", "network_none")
-        print("PROBE_DONE", flush=True)
+        event("relay", "LOOPBACK_OK", True, "127.0.0.1")
+    except OSError as exc:
+        report("loopback", "failed", classify_os_error(exc))
+        emit("PROBE_DONE")
         return 1
 
-    relay_proc = subprocess.Popen([sys.executable, RELAY])
-    time.sleep(0.3)
-    if relay_proc.poll() is not None:
-        report("relay_start", "failed", "init")
-        print("PROBE_DONE", flush=True)
-        return 1
-
-    # Allowed destination — require verified data exchange via CONNECT tunnel.
+    # UDS must exist and be connectable from this UID before starting the relay.
     try:
-        via_proxy("https://api.cursor.com/", timeout=8.0)
-        report("allowed_public", "ok", "via_proxy")
-    except Exception:
-        report("allowed_public", "failed", "via_proxy")
+        us = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        us.settimeout(2.0)
+        us.connect(UDS)
+        us.close()
+        event("relay", STAGE_UDS_BROKER_REACHABLE, True, UDS)
+    except OSError as exc:
+        event("relay", STAGE_UDS_BROKER_REACHABLE, False, classify_os_error(exc))
+        report("relay_runtime", "failed", f"uds:{classify_os_error(exc)}")
+        emit("PROBE_DONE")
+        return 1
 
-    for case, url in (
-        ("unapproved_public", "https://evil.example/"),
-        ("private_address", "https://10.0.0.1/"),
-        ("ip_literal", "https://1.2.3.4/"),
-    ):
-        try:
-            via_proxy(url, timeout=5.0)
-            report(case, "LEAK", "via_proxy")
-        except Exception:
-            report(case, "denied", "via_proxy")
+    relay_proc = subprocess.Popen(
+        [sys.executable, RELAY],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    event("relay", STAGE_RELAY_PROCESS_STARTED, True, f"pid={relay_proc.pid}")
 
-    # Direct external TCP must fail under --network=none (no proxy).
+    ready = False
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        if relay_proc.poll() is not None:
+            event("relay", STAGE_RELAY_TCP_LISTENING, False, "relay_exited")
+            report("relay_start", "failed", f"exit_{relay_proc.returncode}")
+            emit("PROBE_DONE")
+            return 1
+        line = ""
+        if relay_proc.stdout is not None:
+            # Non-blocking-ish: short select via timeout on readline is not available;
+            # fall through to TCP poll which is the authoritative readiness signal.
+            pass
+        ok, detail = wait_tcp_ready("127.0.0.1", PORT, deadline_seconds=0.2)
+        if ok:
+            ready = True
+            event("relay", STAGE_RELAY_TCP_LISTENING, True, detail)
+            break
+        time.sleep(0.05)
+
+    if not ready:
+        event("relay", STAGE_RELAY_TCP_LISTENING, False, "deadline")
+        report("relay_start", "failed", "not_ready")
+        relay_proc.kill()
+        emit("PROBE_DONE")
+        return 1
+
+    # --- Allowed path: explicit CONNECT → TLS → GET ---
+    req_allow = f"req-allow-{uuid.uuid4().hex[:12]}"
+    allowed = https_connect_probe(
+        proxy_host="127.0.0.1",
+        proxy_port=PORT,
+        target_host="api.cursor.com",
+        target_port=443,
+        request_id=req_allow,
+        timeout=12.0,
+        expect_allow=True,
+    )
+    for line in format_probe_lines(allowed, case="allowed_public"):
+        emit(line)
+    emit(
+        "PROBE_ALLOWED_PATH "
+        f"relay_ready=true "
+        f"connect_status={allowed.connect_status} "
+        f"tls_ok={allowed.tls_ok} "
+        f"cert_ok={allowed.cert_ok} "
+        f"http_status={allowed.http_status} "
+        f"transport_verified={allowed.transport_verified} "
+        f"failure_stage={allowed.failure_stage or '-'} "
+        f"failure_code={allowed.failure_code or '-'} "
+        f"request_id={req_allow}"
+    )
+
+    # --- Denied destinations: require CONNECT 403 + deny reason ---
+    denied_cases = (
+        ("unapproved_public", "evil.example", 443, "destination_not_allowlisted"),
+        ("private_address", "10.0.0.1", 443, "ip_literal_bypass_denied"),
+        ("ip_literal", "1.2.3.4", 443, "ip_literal_bypass_denied"),
+    )
+    for case, host, port, expected_reason_substr in denied_cases:
+        req = f"req-{case}-{uuid.uuid4().hex[:8]}"
+        result = https_connect_probe(
+            proxy_host="127.0.0.1",
+            proxy_port=PORT,
+            target_host=host,
+            target_port=port,
+            request_id=req,
+            timeout=8.0,
+            expect_allow=False,
+        )
+        for line in format_probe_lines(result, case=case):
+            emit(line)
+        if result.connect_status == 403 and result.deny_reason:
+            if expected_reason_substr in (result.deny_reason or ""):
+                report(case, "denied", result.deny_reason, req)
+            else:
+                report(case, "failed", f"unexpected_deny:{result.deny_reason}", req)
+        elif result.connect_status == 200:
+            report(case, "LEAK", "connect_200", req)
+        else:
+            # Do not treat relay/connectivity failures as enforcement denials.
+            report(
+                case,
+                "failed",
+                f"no_broker_deny:status={result.connect_status}:{result.failure_code}",
+                req,
+            )
+
+    # Direct external — no proxy; capture concrete network error.
     try:
         socket.create_connection(("1.1.1.1", 443), 2.0).close()
         report("direct_external", "LEAK", "route_exists")
-    except OSError:
-        report("direct_external", "denied", "no_route")
+    except OSError as exc:
+        code = classify_os_error(exc)
+        report("direct_external", "denied", f"no_proxy:{code}")
+        event("direct_external", "DIRECT_CONNECT_BLOCKED", True, code)
 
     relay_proc.terminate()
     try:
         relay_proc.wait(timeout=2)
     except Exception:
         relay_proc.kill()
-    print("PROBE_DONE", flush=True)
+    event("relay", "CLEANUP", True, "relay_stopped")
+    emit("PROBE_DONE")
     return 0
 
 
@@ -261,11 +373,22 @@ if __name__ == "__main__":
         raise SystemExit(main())
     except Exception as exc:  # noqa: BLE001
         report("workload", "error", type(exc).__name__)
-        print("PROBE_DONE", flush=True)
+        emit("PROBE_DONE")
         raise SystemExit(1)
 '''
     path.write_text(script, encoding="utf-8")
     path.chmod(0o755)
+    return path
+
+
+def write_probe_transport_module(path: Path) -> Path:
+    """Copy probe_transport.py into the execution work dir for container mount."""
+    import shutil
+
+    src = Path(__file__).with_name("probe_transport.py")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(src, path)
+    path.chmod(0o644)
     return path
 
 
@@ -276,6 +399,7 @@ def build_probe_podman_argv(
     socket_host_path: str,
     relay_host_path: str,
     workload_host_path: str,
+    transport_host_path: str,
     memory_limit: str = "128m",
     cpu_limit: str = "0.25",
     pids_limit: int = 32,
@@ -284,7 +408,7 @@ def build_probe_podman_argv(
 ) -> List[str]:
     if not re.fullmatch(r"eos-netprobe-[A-Za-z0-9._-]{4,80}", container_name):
         raise RuntimeError("invalid_probe_container_name")
-    for p in (socket_host_path, relay_host_path, workload_host_path):
+    for p in (socket_host_path, relay_host_path, workload_host_path, transport_host_path):
         if not Path(p).exists():
             raise RuntimeError(f"probe_path_missing:{p}")
     uid = os.getuid() if container_uid is None else container_uid
@@ -321,6 +445,8 @@ def build_probe_podman_argv(
         f"type=bind,src={relay_host_path},dst=/runtime/egress/relay.py,ro",
         "--mount",
         f"type=bind,src={workload_host_path},dst=/probe/run.py,ro",
+        "--mount",
+        f"type=bind,src={transport_host_path},dst=/probe/transport.py,ro",
         "--workdir",
         "/tmp",
         "--name",
@@ -342,10 +468,14 @@ def build_probe_podman_argv(
     return argv
 
 
-def parse_probe_output(lines: Sequence[str]) -> Tuple[Dict[str, str], bool, List[str]]:
-    """Parse PROBE_RESULT lines. Returns observations, done_seen, diagnostics."""
+def parse_probe_output(
+    lines: Sequence[str],
+) -> Tuple[Dict[str, str], bool, List[str], List[Dict[str, Any]], Dict[str, Any]]:
+    """Parse PROBE_RESULT / PROBE_EVENT / PROBE_ALLOWED_PATH lines."""
     observations: Dict[str, str] = {}
     diagnostics: List[str] = []
+    events: List[Dict[str, Any]] = []
+    allowed_path: Dict[str, Any] = {}
     done = False
     for raw in lines:
         line = raw.strip()
@@ -356,19 +486,54 @@ def parse_probe_output(lines: Sequence[str]) -> Tuple[Dict[str, str], bool, List
             diagnostics.append(line)
             observations["relay_runtime"] = "missing"
             continue
+        if line.startswith("PROBE_ALLOWED_PATH"):
+            for token in line.split()[1:]:
+                if "=" in token:
+                    k, v = token.split("=", 1)
+                    allowed_path[k] = v
+            continue
+        if line.startswith("PROBE_EVENT"):
+            parts = line.split()
+            if len(parts) >= 5:
+                events.append(
+                    {
+                        "case": parts[1],
+                        "code": parts[2],
+                        "ok": parts[3] == "ok",
+                        "detail": parts[4],
+                        "request_id": parts[5] if len(parts) > 5 else "",
+                    }
+                )
+            continue
+        if line.startswith("PROBE_HTTP"):
+            parts = line.split()
+            if len(parts) >= 3:
+                allowed_path.setdefault("http_statuses", {})
+                if isinstance(allowed_path["http_statuses"], dict):
+                    allowed_path["http_statuses"][parts[1]] = parts[2]
+            continue
         if line.startswith("PROBE_RESULT"):
             parts = line.split()
             if len(parts) >= 3:
                 observations[parts[1]] = parts[2]
+                if parts[1] == "allowed_public" and len(parts) >= 4:
+                    allowed_path["result_detail"] = parts[3]
             else:
                 diagnostics.append(f"malformed:{line}")
-    return observations, done, diagnostics
+    return observations, done, diagnostics, events, allowed_path
 
 
 def evaluate_container_observations(
-    observations: Dict[str, str], *, done: bool
+    observations: Dict[str, str],
+    *,
+    done: bool,
+    allowed_path: Optional[Dict[str, Any]] = None,
 ) -> Tuple[bool, List[str]]:
-    """Return (ok, missing_or_bad). Never treats 'attempted' as success."""
+    """Return (ok, missing_or_bad). Never treats 'attempted' as success.
+
+    allowed_public may be 'ok' when TLS+HTTP completed even if HTTP status is
+    401/403/404 (transport evidence). 'failed'/'attempted' never pass.
+    """
     problems: List[str] = []
     if not done:
         problems.append("missing_PROBE_DONE")
@@ -380,7 +545,48 @@ def evaluate_container_observations(
             problems.append(f"bad_observation:{case}={outcome}")
     if observations.get("relay_runtime") == "missing":
         problems.append("relay_runtime_missing_python3")
+    ap = allowed_path or {}
+    if observations.get("allowed_public") == "ok":
+        # Require explicit transport flags when present.
+        tv = str(ap.get("transport_verified", "")).lower()
+        if tv and tv not in {"true", "1", "yes"}:
+            problems.append("allowed_public_ok_without_transport_verified")
     return (not problems), problems
+
+
+def correlate_denied_with_broker(
+    observations: Dict[str, str],
+    tunnel_events: Sequence[Dict[str, Any]],
+) -> Tuple[List[Dict[str, Any]], List[str]]:
+    """Require broker DESTINATION_DENIED events for each denied container case."""
+    denied_paths: List[Dict[str, Any]] = []
+    problems: List[str] = []
+    deny_events = [
+        e
+        for e in tunnel_events
+        if e.get("code") == "DESTINATION_DENIED" and e.get("ok") is False
+    ]
+    mapping = {
+        "unapproved_public": "evil.example",
+        "private_address": "10.0.0.1",
+        "ip_literal": "1.2.3.4",
+    }
+    for case, host in mapping.items():
+        outcome = observations.get(case)
+        matches = [e for e in deny_events if e.get("host") == host]
+        entry = {
+            "case": case,
+            "host": host,
+            "container_outcome": outcome,
+            "broker_denials": matches,
+            "ok": outcome == "denied" and bool(matches),
+        }
+        denied_paths.append(entry)
+        if outcome == "denied" and not matches:
+            problems.append(f"missing_broker_deny:{case}")
+        if outcome != "denied":
+            problems.append(f"denied_case_not_ok:{case}={outcome}")
+    return denied_paths, problems
 
 
 def legacy_false_positive_would_pass(observations: Dict[str, str], policy_ok: bool) -> bool:
@@ -407,11 +613,18 @@ class InjectedNetworkProbeProcess(InjectedFixtureProcess):
         self._stdout.extend(
             lines
             or [
-                "PROBE_RESULT allowed_public ok via_proxy",
-                "PROBE_RESULT unapproved_public denied via_proxy",
-                "PROBE_RESULT private_address denied via_proxy",
-                "PROBE_RESULT ip_literal denied via_proxy",
-                "PROBE_RESULT direct_external denied no_route",
+                "PROBE_EVENT relay RELAY_TCP_LISTENING ok listening -",
+                "PROBE_EVENT allowed_public CONNECT_200 ok connection_established req-allow-inj",
+                "PROBE_EVENT allowed_public TLS_COMPLETED ok handshake_ok req-allow-inj",
+                "PROBE_EVENT allowed_public CERT_VALIDATED ok hostname=api.cursor.com req-allow-inj",
+                "PROBE_EVENT allowed_public HTTP_RESPONSE ok status=403 req-allow-inj",
+                "PROBE_ALLOWED_PATH relay_ready=true connect_status=200 tls_ok=true cert_ok=true http_status=403 transport_verified=true failure_stage=- failure_code=- request_id=req-allow-inj",
+                "PROBE_RESULT allowed_public ok http_403 req-allow-inj",
+                "PROBE_HTTP allowed_public 403 req-allow-inj",
+                "PROBE_RESULT unapproved_public denied destination_not_allowlisted req-deny-1",
+                "PROBE_RESULT private_address denied ip_literal_bypass_denied req-deny-2",
+                "PROBE_RESULT ip_literal denied ip_literal_bypass_denied req-deny-3",
+                "PROBE_RESULT direct_external denied no_proxy:network_unreachable",
                 "PROBE_DONE",
             ]
         )
@@ -543,6 +756,8 @@ class NetworkProbeExecutor:
             "type=bind,src=<RELAY_PY>,dst=/runtime/egress/relay.py,ro",
             "--mount",
             "type=bind,src=<PROBE_RUN_PY>,dst=/probe/run.py,ro",
+            "--mount",
+            "type=bind,src=<PROBE_TRANSPORT_PY>,dst=/probe/transport.py,ro",
             "--workdir",
             "/tmp",
             "--name",
@@ -702,6 +917,9 @@ class NetworkProbeExecutor:
             )
 
             workload = write_probe_workload_script(Path(instance.work_dir) / "run.py")
+            transport_mod = write_probe_transport_module(
+                Path(instance.work_dir) / "transport.py"
+            )
             name = f"eos-netprobe-{request.execution_id[-12:]}"
             argv = build_probe_podman_argv(
                 image_ref=selected_image or request.image_ref,
@@ -709,6 +927,7 @@ class NetworkProbeExecutor:
                 socket_host_path=instance.socket_path,
                 relay_host_path=instance.relay_path,
                 workload_host_path=str(workload),
+                transport_host_path=str(transport_mod),
                 container_uid=uid,
                 container_gid=gid,
             )
@@ -717,6 +936,8 @@ class NetworkProbeExecutor:
                 handle = self.process_factory(request)
                 provenance = SYNTHETIC_IN_MEMORY
                 mode = "INJECTED"
+                # Seed broker-side deny events via UDS CONNECT (no upstream).
+                _seed_broker_policy_denials(instance.socket_path)
             else:
                 if not self.allow_real_podman:
                     failure_reason = "real_podman_disabled_in_executor_config"
@@ -743,8 +964,8 @@ class NetworkProbeExecutor:
 
             self.last_handle = handle
             if handle is not None:
-                for _ in range(64):
-                    line = handle.read_line(0.2)
+                for _ in range(128):
+                    line = handle.read_line(0.25)
                     if line is None:
                         if handle.poll_exit() is not None:
                             break
@@ -787,8 +1008,16 @@ class NetworkProbeExecutor:
                     "error": f"broker_cleanup_exception:{exc}",
                 }
 
-        observations, done, diagnostics = parse_probe_output(lines)
-        obs_ok, obs_problems = evaluate_container_observations(observations, done=done)
+        observations, done, diagnostics, probe_events, allowed_path = parse_probe_output(
+            lines
+        )
+        obs_ok, obs_problems = evaluate_container_observations(
+            observations, done=done, allowed_path=allowed_path
+        )
+        tunnel_events = list(broker_cleanup.get("tunnel_events") or [])
+        denied_paths, deny_problems = correlate_denied_with_broker(
+            observations, tunnel_events
+        )
         policy_ok = bool(cases) and all(
             c.get("ok") for c in cases if c.get("layer") == "policy"
         )
@@ -829,38 +1058,66 @@ class NetworkProbeExecutor:
                 }
             )
 
+        # CONNECT 200 alone is insufficient; require TLS+cert+HTTP status flags.
+        transport_flag = str(allowed_path.get("transport_verified", "")).lower() in {
+            "true",
+            "1",
+            "yes",
+        }
+        tls_flag = str(allowed_path.get("tls_ok", "")).lower() in {"true", "1", "yes"}
+        cert_flag = str(allowed_path.get("cert_ok", "")).lower() in {"true", "1", "yes"}
+        allowed_ok = observations.get("allowed_public") == "ok"
         transport_ok = (
             mode in {"INJECTED", "PODMAN"}
-            and obs_ok
+            and allowed_ok
+            and transport_flag
+            and tls_flag
+            and cert_flag
             and "relay_runtime" not in observations
         )
+        # Broker-confirmed denials required only for real OCI enforcement.
+        denials_ok = not deny_problems if mode == "PODMAN" else True
+        for problem in deny_problems if mode == "PODMAN" else []:
+            cases.append(
+                {
+                    "case": "broker_correlation",
+                    "ok": False,
+                    "layer": "broker",
+                    "decision": {"reason": problem},
+                }
+            )
+
         enforcement_ok = (
             policy_ok
             and runtime_ok
             and obs_ok
+            and transport_ok
+            and denials_ok
             and cleanup_ok
-            and mode in {"INJECTED", "PODMAN"}
+            and mode == "PODMAN"
             and status != "REFUSED_PODMAN_DISABLED"
             and failure_reason is None
         )
 
         if status == "REFUSED_PODMAN_DISABLED":
             verification_level = "POLICY_VALIDATED" if policy_ok else "FAILED"
-        elif failure_reason:
+        elif failure_reason and mode != "INJECTED":
             verification_level = "FAILED"
             status = "FAILED"
         elif enforcement_ok:
-            verification_level = (
-                "ENFORCEMENT_VERIFIED"
-                if mode == "PODMAN"
-                else "TRANSPORT_VERIFIED"
-            )
-            # Injected path can prove transport+policy evidence offline, never
-            # claim live OCI enforcement without real Podman provenance.
-            if mode == "INJECTED":
-                verification_level = "TRANSPORT_VERIFIED"
+            verification_level = "ENFORCEMENT_VERIFIED"
             status = "COMPLETED"
             failure_reason = None
+        elif policy_ok and transport_ok and obs_ok and mode == "INJECTED":
+            verification_level = "TRANSPORT_VERIFIED"
+            status = "COMPLETED"
+            failure_reason = None
+        elif policy_ok and transport_ok and not denials_ok:
+            verification_level = "TRANSPORT_VERIFIED"
+            status = "FAILED"
+            failure_reason = "broker_denial_correlation_incomplete:" + ",".join(
+                deny_problems
+            )
         elif policy_ok and not obs_ok:
             verification_level = "POLICY_VALIDATED"
             status = "FAILED"
@@ -869,8 +1126,38 @@ class NetworkProbeExecutor:
             verification_level = "FAILED"
             status = "FAILED"
             failure_reason = failure_reason or (
-                "probe_failed:" + ",".join(obs_problems or ["unknown"])
+                "probe_failed:"
+                + ",".join(obs_problems or deny_problems or ["unknown"])
             )
+
+        # Normalize allowed_path booleans for machine-readable output.
+        allowed_path_out = {
+            "relay_ready": str(allowed_path.get("relay_ready", "")).lower()
+            in {"true", "1", "yes"},
+            "broker_connected": any(
+                e.get("code") == "CONNECT_RECEIVED" for e in tunnel_events
+            ),
+            "connect_response_code": _maybe_int(allowed_path.get("connect_status")),
+            "destination_allowed": allowed_ok and transport_flag,
+            "dns_resolution": any(
+                e.get("code") == "DNS_RESOLVED" for e in tunnel_events
+            ),
+            "upstream_connected": any(
+                e.get("code") == "UPSTREAM_CONNECTED" for e in tunnel_events
+            ),
+            "tls_handshake": tls_flag,
+            "certificate_validated": cert_flag,
+            "http_status": _maybe_int(allowed_path.get("http_status")),
+            "transport_verified": transport_flag,
+            "failure_stage": allowed_path.get("failure_stage")
+            if str(allowed_path.get("failure_stage", "-")) not in {"-", ""}
+            else None,
+            "failure_code": allowed_path.get("failure_code")
+            if str(allowed_path.get("failure_code", "-")) not in {"-", ""}
+            else None,
+            "request_id": allowed_path.get("request_id"),
+            "raw": dict(allowed_path),
+        }
 
         run_id = new_id("netprobe")
         return NetworkProbeResult(
@@ -884,6 +1171,7 @@ class NetworkProbeExecutor:
                 "interrupt": interrupt,
                 "observations": broker_cleanup.get("observations") or [],
                 "tunnel_stats": broker_cleanup.get("tunnel_stats") or [],
+                "tunnel_events": tunnel_events,
                 "live_connect_enabled": self.broker_runtime.status().get(
                     "live_connect_enabled"
                 ),
@@ -910,14 +1198,50 @@ class NetworkProbeExecutor:
             proxy_compatibility=proxy_compatibility_matrix(),
             verification_level=verification_level,
             policy_validated=policy_ok,
-            transport_verified=transport_ok and policy_ok,
+            transport_verified=bool(transport_ok and policy_ok),
             enforcement_verified=(
-                enforcement_ok and mode == "PODMAN" and verification_level == "ENFORCEMENT_VERIFIED"
+                enforcement_ok and verification_level == "ENFORCEMENT_VERIFIED"
             ),
             container_observations=observations,
             prerequisites=prereq,
             image_identity=image_identity_dict,
+            allowed_path=allowed_path_out,
+            denied_paths=denied_paths,
+            tunnel_events=tunnel_events,
+            probe_events=probe_events,
         )
+
+
+def _maybe_int(value: Any) -> Optional[int]:
+    try:
+        if value is None or value == "" or value == "None":
+            return None
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _seed_broker_policy_denials(socket_path: str) -> None:
+    """Issue CONNECT requests for known-denied hosts to create broker events."""
+    import socket as _socket
+
+    for host, port in (("evil.example", 443), ("10.0.0.1", 443), ("1.2.3.4", 443)):
+        try:
+            sock = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+            sock.settimeout(2.0)
+            sock.connect(socket_path)
+            sock.sendall(
+                (
+                    f"CONNECT {host}:{port} HTTP/1.1\r\n"
+                    f"Host: {host}:{port}\r\n"
+                    f"X-EOS-Request-Id: seed-{host}\r\n"
+                    f"\r\n"
+                ).encode("ascii")
+            )
+            sock.recv(1024)
+            sock.close()
+        except OSError:
+            continue
 
 
 def default_injected_probe_factory(
