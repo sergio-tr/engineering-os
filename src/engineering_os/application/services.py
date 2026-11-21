@@ -39,6 +39,8 @@ from engineering_os.infrastructure.evidence import (
     ERROR,
     EXTERNALLY_VERIFIED,
     LIVE_READ_ONLY,
+    SYNTHETIC_IN_MEMORY,
+    SYNTHETIC_OCI_EXECUTED,
     UNVERIFIED,
     is_synthetic,
 )
@@ -63,6 +65,17 @@ from engineering_os.infrastructure.gateway_client import (
     InMemoryGatewayTransport,
     OpenClawGatewayClient,
     default_gateway_client,
+)
+from engineering_os.infrastructure.oci_acp_transport import OciAcpStdioTransport
+from engineering_os.infrastructure.podman_executor import (
+    FixtureLaunchRequest,
+    OwnerGateError,
+    PodmanSandboxExecutor,
+    default_injected_factory,
+    probe_podman_runtime,
+    require_owner_execution_gates,
+    resolve_local_fixture_image,
+    sha256_text,
 )
 from engineering_os.infrastructure.openclaw_adapter import OpenClawCoordinatorAdapter
 from engineering_os.infrastructure.openclaw_client import OpenClawCliClient
@@ -113,6 +126,7 @@ class ControlPlane:
         acp_scenario: str = "success",
         gateway_client: Optional[OpenClawGatewayClient] = None,
         acpx_bridge: Optional[AcpxSandboxBridge] = None,
+        oci_executor: Optional[PodmanSandboxExecutor] = None,
     ) -> None:
         self.repo = repo
         self.synthetic = execution_adapter or SyntheticExecutionAdapter()
@@ -151,6 +165,13 @@ class ControlPlane:
             gateway=self.gateway,
             sandbox=PodmanAcpSandboxLauncher(),
             sandbox_gate=sandbox_gate,
+        )
+        # Default executor uses injected process factory for offline safety.
+        # Real Podman requires explicit Owner gates + allow_real_podman.
+        self.oci = oci_executor or PodmanSandboxExecutor(
+            process_factory=default_injected_factory("success"),
+            allow_real_podman=False,
+            code_revision="eos08-dev",
         )
 
     # --- factories ---
@@ -1896,6 +1917,322 @@ class ControlPlane:
             "ready_after": [t.task_id for t in self.list_ready_tasks(project.project_id)],
             "runtime": self.runtime_status(),
             "note": "No containers, Gateway WS, ACPX or Cursor processes were started",
+        }
+
+    # --- EOS-08 OCI ACP fixture ---
+    def sandbox_fixture_readiness(self) -> Dict[str, Any]:
+        return self.oci.readiness()
+
+    def sandbox_fixture_plan(
+        self,
+        *,
+        execution_id: Optional[str] = None,
+        image_ref: str = "localhost/alpine:eos-fixture",
+    ) -> Dict[str, Any]:
+        if execution_id:
+            execution = self.repo.get_execution(execution_id)
+            if not execution:
+                raise KeyError(f"unknown execution: {execution_id}")
+            req = FixtureLaunchRequest(
+                execution_id=execution.execution_id,
+                project_id=execution.project_id,
+                task_id=execution.task_id,
+                image_ref=image_ref,
+                image_digest=None,
+                correlation_id=execution.idempotency_key,
+            )
+        else:
+            req = FixtureLaunchRequest(
+                execution_id="exec-plan-only",
+                project_id="proj-plan",
+                task_id="task-plan",
+                image_ref=image_ref,
+                image_digest=None,
+                correlation_id="plan-only",
+            )
+        plan = self.oci.plan(req)
+        return {"plan": plan.to_dict(), "readiness": self.oci.readiness()}
+
+    def sandbox_fixture_history(self, project_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        return self.repo.list_oci_fixture_runs(project_id=project_id)
+
+    def run_oci_acp_fixture(
+        self,
+        *,
+        execute: bool = False,
+        allow_phase_b: bool = False,
+        owner_authorize_runtime_execution: bool = False,
+        dry_run: bool = True,
+        image_ref: str = "localhost/alpine:eos-fixture",
+        scenario: str = "success",
+        use_injected: bool = False,
+    ) -> Dict[str, Any]:
+        """Run ACP fixture through OCI executor + AcpSessionManager.
+
+        Real Podman requires the Owner triple-gate and use_injected=False.
+        Offline demos/tests pass use_injected=True to keep the process factory.
+        """
+        owner_real = bool(execute and not dry_run and not use_injected)
+        if owner_real:
+            require_owner_execution_gates(
+                execute=execute,
+                allow_phase_b=allow_phase_b,
+                owner_authorize_runtime_execution=owner_authorize_runtime_execution,
+            )
+            # Owner triple-gate selects the real Podman path (not injected).
+            probe = probe_podman_runtime()
+            resolved = image_ref
+            if resolved in {"localhost/alpine:eos-fixture", "", None}:
+                resolved = probe.get("image_ref") or resolve_local_fixture_image()
+            if not resolved:
+                raise PolicyError("required_local_alpine_or_busybox_image_absent")
+            if probe.get("rootless") is not True:
+                raise PolicyError(
+                    f"podman_rootless_required:{probe.get('rootless')}:{probe.get('error')}"
+                )
+            image_ref = resolved
+            self.oci = PodmanSandboxExecutor(
+                process_factory=None,
+                allow_real_podman=True,
+                podman_info_runner=lambda: probe,
+                code_revision="eos08-owner",
+                expected_image_digest=None,
+            )
+        elif self.oci.process_factory is not None:
+            # Offline/demo paths keep the injected fixture peer.
+            self.oci.process_factory = default_injected_factory(scenario)
+
+        project = self.create_project("OCI ACP Fixture", "local/oci-fixture")
+        goal = self.create_goal(project.project_id, "OCI fixture ACP session")
+        task = self.create_task(goal.goal_id, "Run sandboxed ACP fixture")
+        self.approve_goal(goal.goal_id)
+        execution = self.prepare_synthetic_execution(task.task_id)
+
+        # Idempotency: refuse duplicate active OCI run for same execution.
+        existing = self.repo.get_oci_fixture_run_by_execution(execution.execution_id)
+        if existing and existing["status"] in {"RUNNING", "STARTING"}:
+            return {
+                "action": "duplicate_suppressed",
+                "run": existing,
+                "evidence_class": existing["provenance"],
+            }
+
+        req = FixtureLaunchRequest(
+            execution_id=execution.execution_id,
+            project_id=project.project_id,
+            task_id=task.task_id,
+            image_ref=image_ref,
+            image_digest=None,
+            correlation_id=execution.idempotency_key,
+        )
+
+        start = self.oci.start(
+            req,
+            execute=execute and not dry_run,
+            allow_phase_b=allow_phase_b,
+            owner_authorize_runtime_execution=owner_authorize_runtime_execution,
+            dry_run=dry_run or not execute,
+        )
+        if not start.get("started"):
+            return {
+                "action": start.get("action"),
+                "dry_run": start,
+                "execution": execution.to_dict(),
+                "project_id": project.project_id,
+                "live_cursor_acp": False,
+            }
+
+        handle = self.oci.last_handle
+        assert handle is not None
+        provenance = start["evidence_class"]
+        run = {
+            "run_id": new_id("ocirun"),
+            "execution_id": execution.execution_id,
+            "project_id": project.project_id,
+            "task_id": task.task_id,
+            "acp_session_id": None,
+            "container_id": handle.container_id,
+            "code_revision": start.get("code_revision") or "unknown",
+            "image_ref": image_ref,
+            "image_digest": None,
+            "applied_limits": {
+                "memory": req.memory_limit,
+                "cpu": req.cpu_limit,
+                "pids": req.pids_limit,
+                "wall_clock": req.wall_clock_seconds,
+                "tmpfs": req.tmpfs_size,
+            },
+            "runtime_controls": start["plan"]["controls"],
+            "exit_code": None,
+            "timeout_or_cancel": None,
+            "exchange_summary": {},
+            "host_observations": {"rootless_policy": True, "network": "none"},
+            "cleanup_status": None,
+            "evidence_refs": [],
+            "evidence_hashes": {},
+            "provenance": provenance,
+            "status": "RUNNING",
+            "failure_reason": None,
+            "correlation_id": execution.idempotency_key,
+            "created_at": utc_now(),
+            "started_at": utc_now(),
+            "completed_at": None,
+        }
+        run = self.repo.insert_oci_fixture_run(run)
+
+        transport = OciAcpStdioTransport(handle, evidence_class=provenance)
+        manager = AcpSessionManager(
+            self.repo, transport, sandbox_gate=self.sandbox_gate
+        )
+        session = manager.create_session_record(
+            execution_id=execution.execution_id,
+            project_id=project.project_id,
+            task_id=task.task_id,
+            agent_id="eos-acp-fixture",
+            backend="oci-fixture",
+            transport_type=transport.name,
+            correlation_id=execution.idempotency_key,
+        )
+        try:
+            session = manager.run_to_completion(
+                session,
+                prompt_text="EOS-08 OCI ACP fixture prompt",
+                mode="SYNTHETIC",
+            )
+        finally:
+            cleanup = handle.cleanup()
+            result = handle.wait(timeout=1.0)
+
+        run["acp_session_id"] = session["session_id"]
+        run["exit_code"] = result.returncode
+        run["timeout_or_cancel"] = (
+            "timeout" if result.timed_out else ("cancelled" if result.cancelled else None)
+        )
+        run["exchange_summary"] = transport.summary()
+        run["cleanup_status"] = "ok" if cleanup.get("cleaned_up") else "failed"
+        run["host_observations"] = {
+            **run["host_observations"],
+            "cleanup": cleanup,
+            "stderr_bytes": len(handle.stderr_text.encode("utf-8")),
+        }
+        evidence = list(session.get("evidence_refs") or []) + [
+            f"oci-run:{run['run_id']}",
+            f"container:{handle.container_id}",
+        ]
+        run["evidence_refs"] = evidence
+        run["evidence_hashes"] = {
+            "exchange": sha256_text(str(transport.summary())),
+            "controls": sha256_text(str(run["runtime_controls"])),
+        }
+        if session["status"] == "COMPLETED" and run["cleanup_status"] == "ok":
+            run["status"] = "COMPLETED"
+        else:
+            run["status"] = "FAILED"
+            run["failure_reason"] = session.get("failure_reason") or run["timeout_or_cancel"]
+        run["completed_at"] = utc_now()
+        run = self.repo.update_oci_fixture_run(run)
+
+        # Advance execution lifecycle without claiming GitHub verification.
+        version = execution.version
+        assert_transition("execution", execution.status, "DISPATCHED", EXECUTION_TRANSITIONS)
+        execution.status = "DISPATCHED"
+        execution.started_at = utc_now()
+        execution.runner_type = "OCI_ACP_FIXTURE"
+        execution = self.repo.update_execution(execution, expected_version=version)
+        version = execution.version
+        assert_transition("execution", execution.status, "RUNNING", EXECUTION_TRANSITIONS)
+        execution.status = "RUNNING"
+        execution = self.repo.update_execution(execution, expected_version=version)
+        version = execution.version
+        if run["status"] == "COMPLETED":
+            store_key = self.evidence.store(
+                execution.execution_id, evidence, {"oci_run": run["run_id"]}
+            )
+            execution.evidence_refs = evidence + [store_key]
+            assert_transition(
+                "execution", execution.status, "SUCCEEDED", EXECUTION_TRANSITIONS
+            )
+            execution.status = "SUCCEEDED"
+            execution.ended_at = utc_now()
+            execution = self.repo.update_execution(execution, expected_version=version)
+            task_obj = self._require_task(task.task_id)
+            t_version = task_obj.version
+            assert_transition("task", task_obj.lifecycle_state, "RUNNING", TASK_TRANSITIONS)
+            task_obj.lifecycle_state = "RUNNING"
+            task_obj = self.repo.update_task(task_obj, expected_version=t_version)
+            t_version = task_obj.version
+            assert_transition("task", task_obj.lifecycle_state, "REVIEW", TASK_TRANSITIONS)
+            task_obj.lifecycle_state = "REVIEW"
+            task_obj = self.repo.update_task(task_obj, expected_version=t_version)
+            t_version = task_obj.version
+            assert_transition("task", task_obj.lifecycle_state, "DONE", TASK_TRANSITIONS)
+            task_obj.lifecycle_state = "DONE"
+            self.repo.update_task(task_obj, expected_version=t_version)
+        else:
+            assert_transition("execution", execution.status, "FAILED", EXECUTION_TRANSITIONS)
+            execution.status = "FAILED"
+            execution.failure_reason = run.get("failure_reason")
+            execution.ended_at = utc_now()
+            self.repo.update_execution(execution, expected_version=version)
+
+        return {
+            "action": "oci_fixture_completed",
+            "run": run,
+            "session": session,
+            "execution": execution.to_dict(),
+            "project_id": project.project_id,
+            "provenance": provenance,
+            "live_cursor_acp": False,
+            "note": "SYNTHETIC_OCI path; never CURSOR_ACP_LIVE",
+        }
+
+    def run_sandbox_fixture_demo(self) -> Dict[str, Any]:
+        """Offline demo: injected OCI boundary + real AcpSessionManager."""
+        self.oci = PodmanSandboxExecutor(
+            process_factory=default_injected_factory("success"),
+            allow_real_podman=False,
+            code_revision="eos08-demo",
+            podman_info_runner=lambda: {
+                "rootless": True,
+                "image_present": True,
+                "image_digest": "sha256:" + ("e" * 64),
+            },
+        )
+        # Exercise incomplete gate rejection.
+        gate_error = None
+        try:
+            require_owner_execution_gates(
+                execute=True, allow_phase_b=False, owner_authorize_runtime_execution=False
+            )
+        except OwnerGateError as exc:
+            gate_error = {"rejected": True, "code": exc.code, "message": str(exc)}
+
+        result = self.run_oci_acp_fixture(
+            execute=True,
+            allow_phase_b=True,
+            owner_authorize_runtime_execution=True,
+            dry_run=False,
+            scenario="success",
+            use_injected=True,
+        )
+        # Restart recovery check
+        run_id = result["run"]["run_id"]
+        execution_id = result["execution"]["execution_id"]
+        project_id = result["project_id"]
+        # Ambiguous RUNNING would block redispatch — demo completed so OK.
+        again = self.repo.get_oci_fixture_run_by_execution(execution_id)
+        return {
+            "mode": "SANDBOX_FIXTURE_OFFLINE",
+            "gate_incomplete_rejected": gate_error,
+            "result": result,
+            "restart": {
+                "run_status": again["status"] if again else None,
+                "run_id": run_id,
+                "history": len(self.repo.list_oci_fixture_runs(project_id=project_id)),
+            },
+            "dry_plan": self.sandbox_fixture_plan(image_ref="localhost/alpine:eos-fixture"),
+            "live_cursor_acp": False,
+            "note": "Injected OCI process only; no Podman/containers started",
         }
 
     # --- helpers ---

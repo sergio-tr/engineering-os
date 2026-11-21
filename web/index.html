@@ -115,6 +115,18 @@
     </section>
 
     <section>
+      <h2>OCI ACP fixture <span class="badge SYNTHETIC">SYNTHETIC_OCI</span></h2>
+      <p class="meta">Read-only view of fixture readiness and history. Real Podman execution is CLI/Owner-only (not available here).</p>
+      <div class="row" style="margin-bottom:0.75rem">
+        <button type="button" id="btn-oci-readiness">Fixture readiness</button>
+        <button type="button" id="btn-oci-history">Fixture history</button>
+        <button type="button" id="btn-oci-demo" class="synth">Run offline OCI demo</button>
+      </div>
+      <div id="oci-panel" class="panel empty">Load OCI fixture status explicitly</div>
+      <ul id="oci-history-list" class="list"></ul>
+    </section>
+
+    <section>
       <h2>Integrations</h2>
       <div class="row" style="margin-bottom:0.75rem">
         <button type="button" id="btn-integrations">Refresh integrations overview</button>

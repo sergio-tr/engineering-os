@@ -10,6 +10,11 @@ UNVERIFIED = "UNVERIFIED"
 ERROR = "ERROR"
 UNAVAILABLE = "UNAVAILABLE"
 
+# EOS-08 execution provenance.
+SYNTHETIC_IN_MEMORY = "SYNTHETIC_IN_MEMORY"
+SYNTHETIC_OCI_EXECUTED = "SYNTHETIC_OCI_EXECUTED"
+CURSOR_ACP_LIVE = "CURSOR_ACP_LIVE"
+
 # Legacy synthetic adapter label (preserved).
 SIMULATED_INTEGRATION = "simulated_integration"
 EXTERNALLY_VERIFIED = "externally_verified"
@@ -24,12 +29,20 @@ EVIDENCE_CLASSES = frozenset(
         UNAVAILABLE,
         SIMULATED_INTEGRATION,
         EXTERNALLY_VERIFIED,
+        SYNTHETIC_IN_MEMORY,
+        SYNTHETIC_OCI_EXECUTED,
+        CURSOR_ACP_LIVE,
     }
 )
 
 
 def is_synthetic(evidence_class: str) -> bool:
-    return evidence_class in {SYNTHETIC, SIMULATED_INTEGRATION}
+    return evidence_class in {
+        SYNTHETIC,
+        SIMULATED_INTEGRATION,
+        SYNTHETIC_IN_MEMORY,
+        SYNTHETIC_OCI_EXECUTED,
+    }
 
 
 def is_live_or_cached(evidence_class: str) -> bool:

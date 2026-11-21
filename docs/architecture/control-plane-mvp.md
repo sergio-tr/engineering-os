@@ -114,6 +114,20 @@ Implemented locally:
 Critical constraint: OpenClaw ACP harnesses run on the host; `sandbox=require` is not
 ACP isolation evidence. Direct host Cursor ACP and unauthenticated launches stay rejected.
 
+## OCI ACP fixture execution (EOS-08)
+
+`PodmanSandboxExecutor` turns sandbox specifications into a process boundary:
+
+- Fixed Podman argv (rootless policy, network none, cap-drop, no-new-privileges, tmpfs)
+- NDJSON ACP stdio transport (`OciAcpStdioTransport`) over the process handle
+- Minimal Alpine/BusyBox ACP fixture (`fixtures/acp_fixture.sh`) — not Cursor
+- Owner triple-gate for real execution: `--execute --allow-phase-b --owner-authorize-runtime-execution`
+- Injected process factory for offline tests/demo (no containers in CI)
+- Durable `oci_fixture_runs` evidence with provenance `SYNTHETIC_IN_MEMORY` /
+  `SYNTHETIC_OCI_EXECUTED` (never `CURSOR_ACP_LIVE`)
+
+HTTP API exposes readiness/history/offline demo only; real OCI launch is CLI/Owner-only.
+
 ## Assumptions
 
 - Python ≥ 3.10 standard library only (no third-party runtime dependencies)

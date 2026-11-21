@@ -128,6 +128,25 @@ a sandbox-enforced launcher specification. Real launches remain blocked without
 trusted host-side authorization and verified enforcement. A UI `sandbox_gate=PASS`
 string alone is not sufficient.
 
+### OCI ACP fixture (EOS-08)
+
+```bash
+# Offline injected OCI boundary + real AcpSessionManager (no containers)
+python3 scripts/eos.py sandbox demo-fixture --temp
+
+python3 scripts/eos.py sandbox fixture-readiness
+python3 scripts/eos.py sandbox fixture-plan
+python3 scripts/eos.py sandbox run-acp-fixture --dry-run
+
+# Owner-only real Podman (do not run during automated development):
+# python3 scripts/eos.py sandbox run-acp-fixture \
+#   --execute --allow-phase-b --owner-authorize-runtime-execution
+```
+
+The first real workload is a minimal NDJSON ACP fixture (not Cursor). Provenance is
+`SYNTHETIC_OCI_EXECUTED` for real Podman runs and `SYNTHETIC_IN_MEMORY` for injected
+tests. `CURSOR_ACP_LIVE` remains unused. HTTP/dashboard never expose real OCI launch.
+
 ## Candidate architecture (provisional)
 
 The priority candidate chain is:

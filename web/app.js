@@ -816,5 +816,62 @@
     }
   });
 
+  $("btn-oci-readiness").addEventListener("click", async () => {
+    try {
+      const data = await api("/api/sandbox/fixture-readiness");
+      const el = $("oci-panel");
+      el.classList.remove("empty");
+      el.innerHTML = `
+        <div class="row">OCI fixture ${badge(data.status)} ${badge(data.evidence_class)}</div>
+        <div class="meta">Workload: ${escapeHtml(data.workload_profile || "")}</div>
+        <div class="meta">Blocked: ${escapeHtml((data.blocked_reasons || []).join(", ") || "none")}</div>
+        <div class="meta">Live Cursor ACP: false · Real run: CLI Owner-only</div>
+      `;
+    } catch (err) {
+      toast(err.message, true);
+    }
+  });
+
+  $("btn-oci-history").addEventListener("click", async () => {
+    try {
+      const q = selectedProjectId
+        ? `?project_id=${encodeURIComponent(selectedProjectId)}`
+        : "";
+      const rows = await api("/api/sandbox/fixture-history" + q);
+      const ul = $("oci-history-list");
+      if (!rows.length) {
+        ul.innerHTML = `<li class="empty">No OCI fixture runs</li>`;
+        return;
+      }
+      ul.innerHTML = rows
+        .map(
+          (r) => `<li>
+          <div class="row"><strong>${escapeHtml(r.run_id)}</strong> ${badge(r.status)} ${badge(r.provenance)}</div>
+          <div class="meta">container ${escapeHtml(r.container_id || "—")} · exit ${escapeHtml(String(r.exit_code))} · cleanup ${escapeHtml(r.cleanup_status || "—")}</div>
+          <div class="meta">session ${escapeHtml(r.acp_session_id || "—")}</div>
+        </li>`
+        )
+        .join("");
+    } catch (err) {
+      toast(err.message, true);
+    }
+  });
+
+  $("btn-oci-demo").addEventListener("click", async () => {
+    try {
+      const result = await api("/api/sandbox/demo-fixture", {
+        method: "POST",
+        body: "{}",
+      });
+      selectedProjectId = result.result && result.result.project_id;
+      toast("Offline OCI fixture demo completed");
+      await refresh();
+      $("btn-oci-readiness").click();
+      $("btn-oci-history").click();
+    } catch (err) {
+      toast(err.message, true);
+    }
+  });
+
   refresh().catch((err) => toast(err.message, true));
 })();

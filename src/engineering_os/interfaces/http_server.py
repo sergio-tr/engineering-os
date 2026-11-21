@@ -342,6 +342,23 @@ def make_handler(state: AppState) -> Callable[..., BaseHTTPRequestHandler]:
                     status, body, ctype = _json_bytes(state.plane.sandbox_readiness())
                     self._send(status, body, ctype)
                     return
+                if path == "/api/sandbox/fixture-readiness":
+                    status, body, ctype = _json_bytes(
+                        state.plane.sandbox_fixture_readiness()
+                    )
+                    self._send(status, body, ctype)
+                    return
+                if path == "/api/sandbox/fixture-history":
+                    project_id = (qs.get("project_id") or [None])[0]
+                    status, body, ctype = _json_bytes(
+                        state.plane.sandbox_fixture_history(project_id)
+                    )
+                    self._send(status, body, ctype)
+                    return
+                if path == "/api/sandbox/fixture-plan":
+                    status, body, ctype = _json_bytes(state.plane.sandbox_fixture_plan())
+                    self._send(status, body, ctype)
+                    return
                 if path == "/api/acpx/status":
                     status, body, ctype = _json_bytes(state.plane.acpx_status())
                     self._send(status, body, ctype)
@@ -640,6 +657,25 @@ def make_handler(state: AppState) -> Callable[..., BaseHTTPRequestHandler]:
                 if path == "/api/acpx/prepare":
                     status, body, ctype = _json_bytes(
                         state.plane.acpx_prepare(data["execution_id"])
+                    )
+                    self._send(status, body, ctype)
+                    return
+                if path == "/api/sandbox/demo-fixture":
+                    # Offline injected demo only — never Owner-gated real Podman.
+                    status, body, ctype = _json_bytes(
+                        state.plane.run_sandbox_fixture_demo()
+                    )
+                    self._send(status, body, ctype)
+                    return
+                if path == "/api/sandbox/run-acp-fixture":
+                    # Hard reject: real OCI execution is CLI/Owner-only.
+                    status, body, ctype = _json_bytes(
+                        {
+                            "ok": False,
+                            "error": "oci_execution_not_exposed_via_http",
+                            "note": "Use CLI with Owner triple-gate locally",
+                        },
+                        403,
                     )
                     self._send(status, body, ctype)
                     return
