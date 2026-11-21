@@ -1,0 +1,103 @@
+"""Persistence ports — no SQLite imports."""
+
+from __future__ import annotations
+
+from typing import Any, Dict, Iterator, List, Optional, Protocol, runtime_checkable
+
+from engineering_os.domain.models import (
+    Approval,
+    Execution,
+    Goal,
+    OperationalEvent,
+    Project,
+    Task,
+)
+
+
+@runtime_checkable
+class ProjectRepositoryPort(Protocol):
+    def upsert_project(self, project: Project) -> Project: ...
+    def get_project(self, project_id: str) -> Optional[Project]: ...
+    def list_projects(self) -> List[Project]: ...
+
+
+@runtime_checkable
+class GoalRepositoryPort(Protocol):
+    def insert_goal(self, goal: Goal) -> Goal: ...
+    def update_goal(self, goal: Goal, *, expected_version: int) -> Goal: ...
+    def get_goal(self, goal_id: str) -> Optional[Goal]: ...
+    def list_goals(self, project_id: Optional[str] = None) -> List[Goal]: ...
+
+
+@runtime_checkable
+class TaskRepositoryPort(Protocol):
+    def insert_task(self, task: Task) -> Task: ...
+    def update_task(self, task: Task, *, expected_version: int) -> Task: ...
+    def get_task(self, task_id: str) -> Optional[Task]: ...
+    def list_tasks(
+        self,
+        *,
+        project_id: Optional[str] = None,
+        goal_id: Optional[str] = None,
+        state: Optional[str] = None,
+    ) -> List[Task]: ...
+
+
+@runtime_checkable
+class ExecutionRepositoryPort(Protocol):
+    def insert_execution(self, execution: Execution) -> Execution: ...
+    def update_execution(
+        self, execution: Execution, *, expected_version: int
+    ) -> Execution: ...
+    def get_execution(self, execution_id: str) -> Optional[Execution]: ...
+    def get_execution_by_idempotency(self, key: str) -> Optional[Execution]: ...
+    def list_executions(
+        self, *, task_id: Optional[str] = None, project_id: Optional[str] = None
+    ) -> List[Execution]: ...
+    def next_attempt_number(self, task_id: str) -> int: ...
+
+
+@runtime_checkable
+class ApprovalRepositoryPort(Protocol):
+    def insert_approval(self, approval: Approval) -> Approval: ...
+    def update_approval(self, approval: Approval) -> Approval: ...
+    def get_approval(self, approval_id: str) -> Optional[Approval]: ...
+    def list_approvals(self, *, pending_only: bool = False) -> List[Approval]: ...
+
+
+@runtime_checkable
+class EventRepositoryPort(Protocol):
+    def append_event(self, event: OperationalEvent) -> OperationalEvent: ...
+    def list_events(
+        self,
+        *,
+        aggregate_type: Optional[str] = None,
+        aggregate_id: Optional[str] = None,
+        limit: int = 200,
+    ) -> List[OperationalEvent]: ...
+
+
+@runtime_checkable
+class UnitOfWorkPort(Protocol):
+    """Shared transactional boundary across focused repositories."""
+
+    def transaction(self) -> Iterator[Any]: ...
+    def close(self) -> None: ...
+
+    @property
+    def projects(self) -> ProjectRepositoryPort: ...
+
+    @property
+    def goals(self) -> GoalRepositoryPort: ...
+
+    @property
+    def tasks(self) -> TaskRepositoryPort: ...
+
+    @property
+    def executions(self) -> ExecutionRepositoryPort: ...
+
+    @property
+    def approvals(self) -> ApprovalRepositoryPort: ...
+
+    @property
+    def events(self) -> EventRepositoryPort: ...
