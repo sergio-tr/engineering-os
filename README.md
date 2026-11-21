@@ -147,36 +147,43 @@ The first real workload is a minimal NDJSON ACP fixture (not Cursor). Provenance
 `SYNTHETIC_OCI_EXECUTED` for real Podman runs and `SYNTHETIC_IN_MEMORY` for injected
 tests. `CURSOR_ACP_LIVE` remains unused. HTTP/dashboard never expose real OCI launch.
 
-### Cursor ACP runtime (EOS-09/10)
+### Cursor ACP runtime (EOS-09–12)
 
 ```bash
 python3 scripts/eos.py cursor demo-fixture --temp
 python3 scripts/eos.py cursor status
 python3 scripts/eos.py cursor image inspect
 python3 scripts/eos.py cursor image build-plan
+python3 scripts/eos.py cursor image build --print-only
 python3 scripts/eos.py cursor image verify
 python3 scripts/eos.py cursor readiness
 python3 scripts/eos.py cursor smoke --dry-run
+python3 scripts/eos.py cursor smoke evidence <EXECUTION_ID>
 python3 scripts/eos.py cursor sessions
 python3 scripts/eos.py cursor deployment-sequence
 python3 scripts/eos.py runtime requirements
 ```
 
-EOS-10/11 add: graceful OCI lifecycle, image verify from local OCI inspect +
-artifact bytes, runtime/live preflight, credential broker (disabled by default),
-**UDS egress broker with `--network=none`** (Podman 3.4.4 compatible; pasta is
-NOT treated as destination enforcement), host authorization, smoke dry-run, and
-orchestrator runtime modes.
+EOS-12 completes the Owner path: per-execution UDS broker lifecycle, TCP→UDS relay
+mounts, injected/real network enforcement probes, Cursor proxy env
+(`HTTP_PROXY`/`HTTPS_PROXY`/`NODE_USE_ENV_PROXY=1`), smoke workflow, and stages A–F.
+Pasta is still **not** treated as destination enforcement on Podman 3.4.4.
 
 ```bash
-python3 scripts/eos.py network status
-python3 scripts/eos.py network probe --dry-run
+python3 scripts/eos.py network broker status
+python3 scripts/eos.py network broker probe --dry-run
 python3 scripts/eos.py cursor live-preflight
+# Owner-only (may open authorized HTTPS from the host broker):
+# python3 scripts/eos.py network broker probe --execute \
+#   --allow-phase-b --owner-authorize-runtime-execution
+# python3 scripts/eos.py cursor smoke --execute \
+#   --allow-phase-b --owner-authorize-runtime-execution
 ```
 
 Live Cursor ACP remains disabled until SANDBOX PASS + host auth + Owner triple-gate
-+ verified broker probe. Automation never builds images, launches containers, or
-accesses real credentials. Do not install `passt` expecting pasta on Podman 3.4.4.
++ verified broker probe + verified image. Automation never builds images, launches
+containers, or accesses real credentials. Do not install `passt` expecting pasta
+on Podman 3.4.4. Dashboard never exposes unrestricted runtime launch.
 
 ## Candidate architecture (provisional)
 

@@ -952,12 +952,55 @@
       const data = await api("/api/network/status");
       const el = $("cursor-panel");
       el.classList.remove("empty");
+      const active = (data.broker_runtime && data.broker_runtime.active_brokers) || 0;
       el.innerHTML = `
         <div class="row">Network ${badge((data.selected_policy && data.selected_policy.status) || "BLOCKED")}</div>
         <div class="meta">Enforcement: ${escapeHtml(data.enforcement || "NOT_ENFORCED")}</div>
         <div class="meta">Podman: ${escapeHtml(((data.podman && data.podman.version) || "—"))} · pasta mode: ${escapeHtml(String((data.podman && data.podman.pasta_network_mode_supported)))}</div>
         <div class="meta">Pasta policy: ${escapeHtml(((data.pasta_policy && data.pasta_policy.enforcement) || "—"))}</div>
         <div class="meta">Selected: ${escapeHtml(((data.selected_policy && data.selected_policy.policy_id) || "—"))}</div>
+        <div class="meta">Broker active: ${escapeHtml(String(active))} · unrestricted forwarder: false</div>
+        <div class="meta">${escapeHtml(data.note || "")}</div>
+      `;
+    } catch (err) {
+      toast(err.message, true);
+    }
+  });
+
+  $("btn-network-probe").addEventListener("click", async () => {
+    try {
+      const data = await api("/api/network/probe");
+      const el = $("cursor-panel");
+      el.classList.remove("empty");
+      const cases = data.cases || [];
+      const ok = cases.filter((c) => c.ok).length;
+      el.innerHTML = `
+        <div class="row">Probe ${badge(data.status || data.action || "DRY_RUN")}</div>
+        <div class="meta">Executed: ${escapeHtml(String(!!data.executed))} · dry-run: ${escapeHtml(String(!!data.dry_run))}</div>
+        <div class="meta">Cases ok: ${escapeHtml(String(ok))}/${escapeHtml(String(cases.length))} (plan only — not a real Podman probe)</div>
+        <div class="meta">Live Cursor ACP: disabled</div>
+      `;
+      toast("Network probe dry-run completed");
+    } catch (err) {
+      toast(err.message, true);
+    }
+  });
+
+  $("btn-deployment-sequence").addEventListener("click", async () => {
+    try {
+      const data = await api("/api/cursor/deployment-sequence");
+      const el = $("cursor-panel");
+      el.classList.remove("empty");
+      const stages = (data.stages || [])
+        .map(
+          (s) =>
+            `<div class="meta"><strong>${escapeHtml(s.stage)}</strong> ${escapeHtml(s.title || "")}</div>`
+        )
+        .join("");
+      el.innerHTML = `
+        <div class="row">Owner stages ${badge(data.increment || "EOS-12")}</div>
+        <div class="meta">Sandbox gate: ${escapeHtml(data.sandbox_gate || "—")} · auto-advance forbidden: ${escapeHtml(String(!!data.auto_advance_forbidden))}</div>
+        ${stages}
         <div class="meta">${escapeHtml(data.note || "")}</div>
       `;
     } catch (err) {
@@ -972,9 +1015,9 @@
       el.classList.remove("empty");
       el.innerHTML = `
         <div class="row">Smoke ${badge(data.action || "dry_run")}</div>
-        <div class="meta">Started: ${escapeHtml(String(data.started))} · Live ${data.live_cursor_acp ? "ON" : "disabled"}</div>
-        <div class="meta">Plan mode: ${escapeHtml(((data.plan && data.plan.mode) || "—"))}</div>
-        <div class="meta">Blocked: ${escapeHtml((((data.plan && data.plan.blocked_reasons) || []).join(", ")) || "none")}</div>
+        <div class="meta">Execution: ${escapeHtml(data.execution_id || "—")} · Live ${data.live_cursor_acp ? "ON" : "disabled"}</div>
+        <div class="meta">Prompt: ${escapeHtml(data.prompt || "—")}</div>
+        <div class="meta">Proxy keys: ${escapeHtml((((data.proxy && data.proxy.configured) && Object.keys(data.proxy.configured)) || []).join(", ") || "—")}</div>
       `;
       toast("Cursor smoke dry-run completed");
     } catch (err) {

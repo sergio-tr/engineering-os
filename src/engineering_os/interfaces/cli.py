@@ -412,15 +412,52 @@ def cmd_runtime(args: argparse.Namespace) -> int:
         plane.close()
 
 
+def cmd_cursor_smoke_evidence(args: argparse.Namespace) -> int:
+    plane = _plane(args.db)
+    try:
+        _print(plane.cursor_smoke_evidence(args.execution_id))
+        return 0
+    finally:
+        plane.close()
+
+
 def cmd_network(args: argparse.Namespace) -> int:
     plane = _plane(args.db)
     try:
-        if args.network_cmd == "status":
+        cmd = args.network_cmd
+        if cmd in {"status", "broker"} and getattr(args, "network_broker_cmd", None) is None:
+            if cmd == "broker":
+                # `eos network broker` without subcommand → status
+                _print(plane.network_broker_status())
+                return 0
             _print(plane.network_status())
             return 0
-        if args.network_cmd == "probe":
+        if cmd == "broker":
+            sub = args.network_broker_cmd
+            if sub == "status":
+                _print(plane.network_broker_status())
+                return 0
+            if sub == "probe":
+                execute = bool(getattr(args, "execute", False))
+                dry_run = bool(getattr(args, "dry_run", False)) or not execute
+                use_injected = not execute
+                _print(
+                    plane.network_probe(
+                        dry_run=dry_run,
+                        execute=execute,
+                        allow_phase_b=bool(getattr(args, "allow_phase_b", False)),
+                        owner_authorize_runtime_execution=bool(
+                            getattr(args, "owner_authorize_runtime_execution", False)
+                        ),
+                        use_injected=use_injected,
+                    )
+                )
+                return 0
+            return 2
+        if cmd == "probe":
             execute = bool(getattr(args, "execute", False))
             dry_run = bool(getattr(args, "dry_run", False)) or not execute
+            use_injected = not execute
             _print(
                 plane.network_probe(
                     dry_run=dry_run,
@@ -429,6 +466,7 @@ def cmd_network(args: argparse.Namespace) -> int:
                     owner_authorize_runtime_execution=bool(
                         getattr(args, "owner_authorize_runtime_execution", False)
                     ),
+                    use_injected=use_injected,
                 )
             )
             return 0
@@ -480,6 +518,13 @@ def cmd_cursor(args: argparse.Namespace) -> int:
                 return 0
             if sub == "build-plan":
                 _print(plane.cursor_image_plan())
+                return 0
+            if sub == "build":
+                _print(
+                    plane.cursor_image_build(
+                        print_only=bool(getattr(args, "print_only", True))
+                    )
+                )
                 return 0
             if sub == "verify":
                 _print(
@@ -1062,7 +1107,7 @@ def build_parser() -> argparse.ArgumentParser:
     c = rs.add_parser("requirements")
     c.set_defaults(func=cmd_runtime)
 
-    p = sub.add_parser("network", help="Egress broker / Podman network enforcement (EOS-11)")
+    p = sub.add_parser("network", help="Egress broker / Podman network enforcement (EOS-11/12)")
     ns = p.add_subparsers(dest="network_cmd", required=True)
     c = ns.add_parser("status")
     c.set_defaults(func=cmd_network)
@@ -1076,6 +1121,21 @@ def build_parser() -> argparse.ArgumentParser:
         default=False,
     )
     c.set_defaults(func=cmd_network)
+    nb = ns.add_parser("broker", help="Trusted egress broker status/probe")
+    nbs = nb.add_subparsers(dest="network_broker_cmd", required=False)
+    c = nbs.add_parser("status")
+    c.set_defaults(func=cmd_network)
+    c = nbs.add_parser("probe")
+    c.add_argument("--dry-run", action="store_true", default=False)
+    c.add_argument("--execute", action="store_true", default=False)
+    c.add_argument("--allow-phase-b", action="store_true", default=False)
+    c.add_argument(
+        "--owner-authorize-runtime-execution",
+        action="store_true",
+        default=False,
+    )
+    c.set_defaults(func=cmd_network)
+    nb.set_defaults(func=cmd_network)
 
     p = sub.add_parser("cursor", help="Cursor ACP runtime integration (EOS-09/10)")
     cs = p.add_subparsers(dest="cursor_cmd", required=True)
@@ -1088,6 +1148,9 @@ def build_parser() -> argparse.ArgumentParser:
     c = imgs.add_parser("inspect")
     c.set_defaults(func=cmd_cursor)
     c = imgs.add_parser("build-plan")
+    c.set_defaults(func=cmd_cursor)
+    c = imgs.add_parser("build")
+    c.add_argument("--print-only", action="store_true", default=True)
     c.set_defaults(func=cmd_cursor)
     c = imgs.add_parser("verify")
     c.add_argument("--image-digest", default=None)
@@ -1114,17 +1177,25 @@ def build_parser() -> argparse.ArgumentParser:
     c = cs.add_parser("evidence")
     c.add_argument("execution_id")
     c.set_defaults(func=cmd_cursor)
-    c = cs.add_parser("smoke", help="Cursor smoke dry-run or Owner-gated execute")
-    c.add_argument("--dry-run", action="store_true", default=False)
-    c.add_argument("--execute", action="store_true", default=False)
-    c.add_argument("--allow-phase-b", action="store_true", default=False)
-    c.add_argument(
+    sm = cs.add_parser("smoke", help="Cursor smoke dry-run, execute, or evidence")
+    sm.add_argument("--dry-run", action="store_true", default=False)
+    sm.add_argument("--execute", action="store_true", default=False)
+    sm.add_argument("--allow-phase-b", action="store_true", default=False)
+    sm.add_argument(
         "--owner-authorize-runtime-execution",
         action="store_true",
         default=False,
     )
-    c.set_defaults(func=cmd_cursor)
-    c = cs.add_parser("deployment-sequence", help="Owner WSL2 deployment commands")
+    sm.set_defaults(func=cmd_cursor, cursor_smoke_cmd=None)
+    sms = sm.add_subparsers(dest="cursor_smoke_cmd", required=False)
+    sev = sms.add_parser("evidence", help="Show smoke evidence for EXECUTION_ID")
+    sev.add_argument("execution_id")
+    sev.set_defaults(func=cmd_cursor_smoke_evidence)
+    # Alias kept for scripts that used smoke-evidence
+    se = cs.add_parser("smoke-evidence", help="Alias for: cursor smoke evidence")
+    se.add_argument("execution_id")
+    se.set_defaults(func=cmd_cursor_smoke_evidence)
+    c = cs.add_parser("deployment-sequence", help="Owner WSL2 deployment stages A-F")
     c.set_defaults(func=cmd_cursor)
     c = cs.add_parser("demo-fixture")
     c.add_argument("--temp", action="store_true")
