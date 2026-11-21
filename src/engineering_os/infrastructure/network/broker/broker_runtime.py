@@ -173,6 +173,7 @@ class BrokerRuntime:
                 }
             observations = broker.observations()
             tunnel_stats = broker.tunnel_stats()
+            tunnel_events = broker.tunnel_events()
             broker.mark_crashed()
             broker.stop()
             sock_gone = True
@@ -202,6 +203,7 @@ class BrokerRuntime:
                 "cleanup_verified": cleanup_ok,
                 "observations": observations,
                 "tunnel_stats": tunnel_stats,
+                "tunnel_events": tunnel_events,
                 "instance": instance.to_dict() if instance else None,
                 "evidence_class": SYNTHETIC if cleanup_ok else ERROR,
             }

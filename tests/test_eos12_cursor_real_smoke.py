@@ -110,12 +110,15 @@ class ProbeExecutorTests(unittest.TestCase):
             relay = Path(tmp) / "relay.py"
             relay.write_text("print(1)\n", encoding="utf-8")
             workload = write_probe_workload_script(Path(tmp) / "run.py")
+            transport = Path(tmp) / "transport.py"
+            transport.write_text("# stub\n", encoding="utf-8")
             argv = build_probe_podman_argv(
                 image_ref="sha256:" + ("c" * 64),
                 container_name="eos-netprobe-abcdefghijkl",
                 socket_host_path=str(sock),
                 relay_host_path=str(relay),
                 workload_host_path=str(workload),
+                transport_host_path=str(transport),
             )
             joined = " ".join(argv)
             self.assertIn("--network", argv)

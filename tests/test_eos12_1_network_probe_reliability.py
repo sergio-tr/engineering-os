@@ -135,11 +135,11 @@ class ConnectTunnelTests(unittest.TestCase):
                 stats = []
                 for _ in range(50):
                     stats = broker.tunnel_stats()
-                    if stats:
+                    if stats and int(stats[0].get("bytes") or 0) > 0:
                         break
                     time.sleep(0.05)
                 self.assertTrue(stats)
-                self.assertGreater(stats[0]["bytes"], 0)
+                self.assertGreater(int(stats[0].get("bytes") or 0), 0)
             finally:
                 broker.stop()
 
@@ -218,7 +218,7 @@ class ConnectTunnelTests(unittest.TestCase):
 
 class EvidenceGateTests(unittest.TestCase):
     def test_attempted_is_not_success(self) -> None:
-        obs, done, _ = parse_probe_output(
+        obs, done, _, _, _ = parse_probe_output(
             [
                 "PROBE_RESULT allowed_public attempted via_proxy",
                 "PROBE_RESULT unapproved_public denied via_proxy",
@@ -235,7 +235,7 @@ class EvidenceGateTests(unittest.TestCase):
         self.assertTrue(legacy_false_positive_would_pass(obs, policy_ok=True))
 
     def test_incomplete_output_fails(self) -> None:
-        obs, done, _ = parse_probe_output(
+        obs, done, _, _, _ = parse_probe_output(
             [
                 "PROBE_RESULT allowed_public ok via_proxy",
                 "PROBE_RESULT unapproved_public denied via_proxy",
@@ -247,7 +247,7 @@ class EvidenceGateTests(unittest.TestCase):
         self.assertTrue(any("missing_observation:direct_external" in p for p in problems))
 
     def test_missing_python_runtime_fails(self) -> None:
-        obs, done, diags = parse_probe_output(
+        obs, done, diags, _, _ = parse_probe_output(
             [
                 "EOS_RELAY_MISSING_RUNTIME python3",
                 "PROBE_RESULT relay_runtime missing python3",
@@ -433,18 +433,22 @@ class ArgvAndWiringTests(unittest.TestCase):
             relay = Path(tmp) / "relay.py"
             relay.write_text("print(1)\n", encoding="utf-8")
             workload = write_probe_workload_script(Path(tmp) / "run.py")
+            transport = Path(tmp) / "transport.py"
+            transport.write_text("# stub\n", encoding="utf-8")
             argv = build_probe_podman_argv(
                 image_ref="sha256:" + ("b" * 64),
                 container_name="eos-netprobe-abcdefghijkl",
                 socket_host_path=str(sock),
                 relay_host_path=str(relay),
                 workload_host_path=str(workload),
+                transport_host_path=str(transport),
             )
             joined = " ".join(argv)
             self.assertIn(f"--user {os.getuid()}:{os.getgid()}", joined)
             self.assertNotIn("--user 65534:65534", joined)
             self.assertIn("python3 /probe/run.py", joined)
-            self.assertIn("urllib.request", workload.read_text(encoding="utf-8"))
+            self.assertIn("/probe/transport.py", joined)
+            self.assertIn("https_connect_probe", workload.read_text(encoding="utf-8"))
             self.assertNotIn("wget", workload.read_text(encoding="utf-8"))
 
     def test_composition_root_wires_live_only_for_owner_real(self) -> None:
