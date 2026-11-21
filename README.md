@@ -185,6 +185,17 @@ Live Cursor ACP remains disabled until SANDBOX PASS + host auth + Owner triple-g
 containers, or accesses real credentials. Do not install `passt` expecting pasta
 on Podman 3.4.4. Dashboard never exposes unrestricted runtime launch.
 
+### Git metadata hygiene
+
+```bash
+# Owner-only: enable repository-local commit-msg validation
+git config --local core.hooksPath .githooks
+python3 scripts/check_git_metadata.py --pr-body-file /tmp/pr-body.md
+```
+
+CI workflow `.github/workflows/git-metadata.yml` rejects forbidden Cursor attribution
+in PR bodies and commit messages. Mark it required in branch protection to enforce merge.
+
 ## Candidate architecture (provisional)
 
 The priority candidate chain is:

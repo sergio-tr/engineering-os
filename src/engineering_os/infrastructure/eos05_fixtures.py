@@ -5,8 +5,8 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, List, Sequence
 
-from engineering_os.infrastructure.github_client import FixtureTransport, HttpResponse
-from engineering_os.infrastructure.openclaw_client import CommandResult
+from engineering_os.infrastructure.integrations.github.github_client import FixtureTransport, HttpResponse
+from engineering_os.infrastructure.integrations.openclaw.openclaw_client import CommandResult
 
 
 COMPANY_ID = "11111111-1111-1111-1111-111111111111"

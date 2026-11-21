@@ -101,3 +101,22 @@ class UnitOfWorkPort(Protocol):
 
     @property
     def events(self) -> EventRepositoryPort: ...
+
+
+@runtime_checkable
+class ControlPlaneStorePort(
+    ProjectRepositoryPort,
+    GoalRepositoryPort,
+    TaskRepositoryPort,
+    ExecutionRepositoryPort,
+    ApprovalRepositoryPort,
+    EventRepositoryPort,
+    Protocol,
+):
+    """Flat persistence facade used by application services.
+
+    Implemented by the SQLite Repository facade. Application code must type
+    against this Protocol rather than importing the concrete SQLite class.
+    """
+
+    def close(self) -> None: ...

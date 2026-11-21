@@ -19,13 +19,13 @@ from engineering_os.infrastructure.eos05_fixtures import (
     openclaw_absent_which,
     openclaw_fixture_runner,
 )
-from engineering_os.infrastructure.github_client import FixtureTransport, HttpResponse
-from engineering_os.infrastructure.openclaw_client import OpenClawCliClient
-from engineering_os.infrastructure.paperclip_client import (
+from engineering_os.infrastructure.integrations.github.github_client import FixtureTransport, HttpResponse
+from engineering_os.infrastructure.integrations.openclaw.openclaw_client import OpenClawCliClient
+from engineering_os.infrastructure.integrations.paperclip.paperclip_client import (
     PaperclipClient,
     PaperclipClientError,
 )
-from engineering_os.infrastructure.sqlite_repo import Repository
+from engineering_os.infrastructure.persistence.sqlite import Repository
 
 
 def _tmp() -> Path:
@@ -93,7 +93,7 @@ class OpenClawClientTests(unittest.TestCase):
 
     def test_invalid_json(self) -> None:
         def runner(argv, timeout, env):
-            from engineering_os.infrastructure.openclaw_client import CommandResult
+            from engineering_os.infrastructure.integrations.openclaw.openclaw_client import CommandResult
 
             return CommandResult(0, "not-json", "", list(argv))
 
@@ -115,7 +115,7 @@ class OpenClawClientTests(unittest.TestCase):
         seen = []
 
         def runner(argv, timeout, env):
-            from engineering_os.infrastructure.openclaw_client import CommandResult
+            from engineering_os.infrastructure.integrations.openclaw.openclaw_client import CommandResult
 
             seen.append(list(argv))
             return CommandResult(0, '{"gateway":{}}', "", list(argv))

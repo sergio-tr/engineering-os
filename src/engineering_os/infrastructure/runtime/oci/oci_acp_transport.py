@@ -5,18 +5,18 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 import json
 
-from engineering_os.infrastructure.acp_protocol import (
+from engineering_os.infrastructure.acp.protocol.acp_protocol import (
     AcpProtocolError,
     MAX_MESSAGE_BYTES,
     parse_message,
 )
-from engineering_os.infrastructure.acp_transport import (
+from engineering_os.infrastructure.acp.transports.acp_transport import (
     AcpRuntimeAvailability,
     AcpTransport,
     AcpTransportError,
 )
 from engineering_os.infrastructure.evidence import SYNTHETIC_IN_MEMORY, SYNTHETIC_OCI_EXECUTED
-from engineering_os.infrastructure.oci_process import OciProcessHandle, OciProcessError
+from engineering_os.infrastructure.runtime.oci.oci_process import OciProcessHandle, OciProcessError
 
 
 class OciAcpStdioTransport(AcpTransport):

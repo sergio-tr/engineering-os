@@ -35,7 +35,8 @@ compatibility shim exporting `Repository`.
 | `infrastructure/integrations/` | GitHub, Paperclip, OpenClaw |
 | `infrastructure/security/` | Credentials, runtime authorization |
 
-Old import paths remain as compatibility shims.
+EOS-14 removed the temporary top-level compatibility shims. Import canonical
+packages directly (for example `infrastructure.integrations.github.github_client`).
 
 ## Interfaces
 

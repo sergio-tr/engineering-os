@@ -17,31 +17,31 @@ import subprocess
 import tempfile
 
 from engineering_os.domain.models import new_id, utc_now
-from engineering_os.infrastructure.broker_runtime import (
+from engineering_os.infrastructure.network.broker.broker_runtime import (
     BrokerRuntime,
     cursor_proxy_env,
     live_connect,
     proxy_compatibility_matrix,
 )
-from engineering_os.infrastructure.egress_broker import blocked_connect
+from engineering_os.infrastructure.network.broker.egress_broker import blocked_connect
 from engineering_os.infrastructure.evidence import (
     ERROR,
     SYNTHETIC,
     SYNTHETIC_IN_MEMORY,
     SYNTHETIC_OCI_EXECUTED,
 )
-from engineering_os.infrastructure.oci_process import (
+from engineering_os.infrastructure.runtime.oci.oci_process import (
     InjectedFixtureProcess,
     OciProcessHandle,
     SubprocessOciHandle,
 )
-from engineering_os.infrastructure.podman_executor import (
+from engineering_os.infrastructure.runtime.oci.podman_executor import (
     probe_podman_runtime,
     require_owner_execution_gates,
     resolve_local_fixture_image,
     sha256_text,
 )
-from engineering_os.infrastructure.sandbox_launcher import scan_argv_for_bypass
+from engineering_os.infrastructure.runtime.sandbox.sandbox_launcher import scan_argv_for_bypass
 
 
 ProbeFactory = Callable[["NetworkProbeRequest"], OciProcessHandle]
@@ -255,7 +255,7 @@ class NetworkProbeExecutor:
 
     def dry_run_plan(self, request: NetworkProbeRequest) -> Dict[str, Any]:
         # Policy-level cases without containers.
-        from engineering_os.infrastructure.egress_broker import TrustedEgressBroker
+        from engineering_os.infrastructure.network.broker.egress_broker import TrustedEgressBroker
 
         plan = TrustedEgressBroker(connect_fn=blocked_connect).probe_plan()
         image = request.image_ref or resolve_local_fixture_image() or "localhost/alpine:eos-fixture"
@@ -339,7 +339,7 @@ class NetworkProbeExecutor:
                 }
             )
         # DNS rebinding
-        from engineering_os.infrastructure.egress_broker import TrustedEgressBroker
+        from engineering_os.infrastructure.network.broker.egress_broker import TrustedEgressBroker
 
         rebind = TrustedEgressBroker(
             allowed_destinations={"api.cursor.com"},

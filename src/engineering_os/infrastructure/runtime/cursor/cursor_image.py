@@ -17,7 +17,7 @@ import os
 import subprocess
 
 from engineering_os.domain.models import utc_now
-from engineering_os.infrastructure.cursor_runtime import PROFILE_PATH, load_image_profile
+from engineering_os.infrastructure.runtime.cursor.cursor_runtime import PROFILE_PATH, load_image_profile
 from engineering_os.infrastructure.evidence import ERROR, SYNTHETIC, UNAVAILABLE
 
 InspectRunner = Callable[[str], Dict[str, Any]]

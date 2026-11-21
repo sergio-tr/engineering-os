@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from engineering_os.infrastructure.cursor_runtime import resolve_cursor_acp_command
+from engineering_os.infrastructure.runtime.cursor.cursor_runtime import resolve_cursor_acp_command
 from engineering_os.infrastructure.evidence import ERROR, SYNTHETIC
 
 

@@ -12,23 +12,23 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from engineering_os.application.orchestrator import SequentialOrchestrator
 from engineering_os.application.services import ControlPlane
-from engineering_os.infrastructure.acpx_cursor_config import (
+from engineering_os.infrastructure.acp.acpx.acpx_cursor_config import (
     propose_acpx_cursor_agent_config,
     validate_acpx_cursor_command,
 )
-from engineering_os.infrastructure.credential_provider import (
+from engineering_os.infrastructure.security.credentials.credential_provider import (
     FixtureCursorCredentialProvider,
     UnavailableCursorCredentialProvider,
     redact_secrets,
 )
-from engineering_os.infrastructure.cursor_runtime import CursorRuntimePlanner
-from engineering_os.infrastructure.network_policy import (
+from engineering_os.infrastructure.runtime.cursor.cursor_runtime import CursorRuntimePlanner
+from engineering_os.infrastructure.network.policy.network_policy import (
     DenyAllNetworkPolicy,
     FixtureAllowlistNetworkPolicy,
     UnenforcedNetworkPolicy,
 )
-from engineering_os.infrastructure.sqlite_repo import Repository
-from engineering_os.infrastructure.workspace_prep import (
+from engineering_os.infrastructure.persistence.sqlite import Repository
+from engineering_os.infrastructure.runtime.cursor.workspace_prep import (
     WorkspacePreparer,
     validate_workspace_path,
 )
@@ -129,7 +129,7 @@ class BridgeServiceTests(unittest.TestCase):
             cursor_bridge=None,
         )
         # Replace cursor bridge with fixture-ready one via demo wiring pattern
-        from engineering_os.infrastructure.cursor_bridge import CursorBridge
+        from engineering_os.infrastructure.runtime.cursor.cursor_bridge import CursorBridge
 
         plane.cursor = CursorBridge(
             plane.repo,

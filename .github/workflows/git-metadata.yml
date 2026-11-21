@@ -1,0 +1,62 @@
+name: Git metadata hygiene
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  attribution:
+    name: Forbid automated Cursor attribution
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Validate PR body from event payload
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          python3 - <<'PY'
+          import os, pathlib, subprocess, sys
+          body = os.environ.get("PR_BODY") or ""
+          path = pathlib.Path("pr-body.md")
+          path.write_text(body, encoding="utf-8")
+          rc = subprocess.call([sys.executable, "scripts/check_git_metadata.py", "--pr-body-file", str(path)])
+          raise SystemExit(rc)
+          PY
+
+      - name: Validate commit messages in the PR
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          python3 - <<'PY'
+          import os, subprocess, sys, pathlib, tempfile
+          base = os.environ["BASE_SHA"]
+          head = os.environ["HEAD_SHA"]
+          log = subprocess.check_output(
+              ["git", "log", "--format=%B%x1e", f"{base}..{head}"],
+              text=True,
+          )
+          rc = 0
+          for idx, msg in enumerate(log.split("\x1e"), start=1):
+              msg = msg.strip("\n")
+              if not msg.strip():
+                  continue
+              path = pathlib.Path(tempfile.mkdtemp()) / f"commit-{idx}.txt"
+              path.write_text(msg + "\n", encoding="utf-8")
+              part = subprocess.call([sys.executable, "scripts/check_git_metadata.py", str(path)])
+              rc |= part
+          raise SystemExit(rc)
+          PY

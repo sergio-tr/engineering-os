@@ -14,27 +14,27 @@ sys.path.insert(0, str(ROOT / "src"))
 from engineering_os.application.orchestrator import SequentialOrchestrator
 from engineering_os.application.services import ControlPlane
 from engineering_os.infrastructure.adapters import DispatchRequest
-from engineering_os.infrastructure.acpx_bridge import AcpxSandboxBridge
-from engineering_os.infrastructure.gateway_client import (
+from engineering_os.infrastructure.acp.acpx.acpx_bridge import AcpxSandboxBridge
+from engineering_os.infrastructure.integrations.openclaw.gateway_client import (
     GatewayClientError,
     InMemoryGatewayTransport,
     OpenClawGatewayClient,
 )
-from engineering_os.infrastructure.runtime_authorization import (
+from engineering_os.infrastructure.security.authorization.runtime_authorization import (
     AuthorizationError,
     RuntimeAuthorization,
     RuntimeAuthorizationVerifier,
 )
-from engineering_os.infrastructure.sandbox_launcher import (
+from engineering_os.infrastructure.runtime.sandbox.sandbox_launcher import (
     PodmanAcpSandboxLauncher,
     RejectHostDirectLauncher,
     scan_argv_for_bypass,
 )
-from engineering_os.infrastructure.sandbox_spec import (
+from engineering_os.infrastructure.runtime.sandbox.sandbox_spec import (
     build_default_spec,
     validate_sandbox_spec,
 )
-from engineering_os.infrastructure.sqlite_repo import Repository
+from engineering_os.infrastructure.persistence.sqlite import Repository
 
 
 def _tmp() -> Path:

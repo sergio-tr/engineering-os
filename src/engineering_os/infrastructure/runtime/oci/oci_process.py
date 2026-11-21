@@ -11,7 +11,7 @@ import subprocess
 import threading
 import time
 
-from engineering_os.infrastructure.acp_fixture import AcpFixturePeer
+from engineering_os.infrastructure.acp.acp_fixture import AcpFixturePeer
 
 
 class OciProcessError(RuntimeError):

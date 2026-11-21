@@ -12,42 +12,42 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from engineering_os.application.services import ControlPlane
-from engineering_os.infrastructure.credential_provider import (
+from engineering_os.infrastructure.security.credentials.credential_provider import (
     FixtureCursorCredentialProvider,
     OwnerEnvFileCredentialProvider,
     redact_secrets,
 )
-from engineering_os.infrastructure.cursor_image import (
+from engineering_os.infrastructure.runtime.cursor.cursor_image import (
     inspect_local_image,
     verify_image_identity,
 )
-from engineering_os.infrastructure.cursor_launcher import (
+from engineering_os.infrastructure.runtime.cursor.cursor_launcher import (
     CursorAcpLauncher,
     CursorLaunchRequest,
     build_cursor_podman_argv,
 )
-from engineering_os.infrastructure.cursor_runtime import CursorRuntimePlanner
-from engineering_os.infrastructure.egress_broker import (
+from engineering_os.infrastructure.runtime.cursor.cursor_runtime import CursorRuntimePlanner
+from engineering_os.infrastructure.network.broker.egress_broker import (
     TrustedEgressBroker,
     blocked_connect,
     cursor_proxy_compatibility,
     write_tcp_uds_relay_script,
 )
-from engineering_os.infrastructure.egress_enforcer import (
+from engineering_os.infrastructure.network.policy.egress_enforcer import (
     FailClosedEgressPolicy,
     PastaAllowlistEgressPolicy,
     UdsBrokerEgressPolicy,
     select_egress_policy,
 )
-from engineering_os.infrastructure.oci_acp_transport import OciAcpStdioTransport
-from engineering_os.infrastructure.oci_process import InjectedFixtureProcess
-from engineering_os.infrastructure.podman_capabilities import (
+from engineering_os.infrastructure.runtime.oci.oci_acp_transport import OciAcpStdioTransport
+from engineering_os.infrastructure.runtime.oci.oci_process import InjectedFixtureProcess
+from engineering_os.infrastructure.runtime.oci.podman_capabilities import (
     PodmanCapabilities,
     parse_podman_version,
     probe_podman_capabilities,
     version_at_least,
 )
-from engineering_os.infrastructure.runtime_authorization import (
+from engineering_os.infrastructure.security.authorization.runtime_authorization import (
     AuthorizationError,
     RuntimeAuthorizationVerifier,
 )

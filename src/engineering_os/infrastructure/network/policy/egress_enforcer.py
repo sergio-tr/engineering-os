@@ -17,8 +17,8 @@ import re
 import shutil
 
 from engineering_os.infrastructure.evidence import ERROR, SYNTHETIC, UNAVAILABLE
-from engineering_os.infrastructure.network_policy import NetworkDecision, NetworkPolicy
-from engineering_os.infrastructure.podman_capabilities import (
+from engineering_os.infrastructure.network.policy.network_policy import NetworkDecision, NetworkPolicy
+from engineering_os.infrastructure.runtime.oci.podman_capabilities import (
     PASTA_MIN_VERSION,
     PodmanCapabilities,
     probe_podman_capabilities,

@@ -8,7 +8,7 @@ from typing import Any, Callable, Dict, List, Optional
 import uuid
 
 from engineering_os.domain.models import utc_now
-from engineering_os.infrastructure.acp_protocol import (
+from engineering_os.infrastructure.acp.protocol.acp_protocol import (
     SUPPORTED_PROTOCOL_VERSION,
     AcpProtocolError,
     initialize_params,

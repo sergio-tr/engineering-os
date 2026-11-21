@@ -6,38 +6,35 @@ from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
 from engineering_os.config import ControlPlaneConfiguration
-from engineering_os.infrastructure.adapters import (
-    ExecutionAdapter,
-    LocalEvidenceAdapter,
-    LocalOwnerDecisionProvider,
-    SimulatedRepositoryIntegrationAdapter,
-)
-from engineering_os.infrastructure.acp_adapter import AcpExecutionAdapter
-from engineering_os.infrastructure.acpx_bridge import AcpxSandboxBridge
-from engineering_os.infrastructure.cursor_bridge import CursorBridge
-from engineering_os.infrastructure.gateway_client import OpenClawGatewayClient
-from engineering_os.infrastructure.openclaw_adapter import OpenClawCoordinatorAdapter
-from engineering_os.infrastructure.podman_executor import PodmanSandboxExecutor
-from engineering_os.infrastructure.sqlite_repo import Repository
+from engineering_os.ports.authorization import OwnerDecisionPort
+from engineering_os.ports.coordination import CoordinatorPort
+from engineering_os.ports.evidence import EvidencePort
+from engineering_os.ports.execution import ExecutionPort
+from engineering_os.ports.persistence import ControlPlaneStorePort
+from engineering_os.ports.repository_integration import RepositoryIntegrationPort
 
 
 @dataclass(frozen=True)
 class ControlPlaneDependencies:
-    """Explicit injectable collaborators. Built only by the composition root."""
+    """Explicit injectable collaborators. Built only by the composition root.
 
-    repo: Repository
+    Persistence and core adapters are typed as ports. Concrete Cursor/OCI/ACP
+    bridges are opaque objects constructed in bootstrap (not imported here).
+    """
+
+    repo: ControlPlaneStorePort
     config: ControlPlaneConfiguration
-    synthetic: ExecutionAdapter
-    live: ExecutionAdapter
-    evidence: LocalEvidenceAdapter
-    repo_integration: SimulatedRepositoryIntegrationAdapter
-    approval_provider: LocalOwnerDecisionProvider
-    openclaw: OpenClawCoordinatorAdapter
-    acp: AcpExecutionAdapter
-    gateway: OpenClawGatewayClient
-    acpx: AcpxSandboxBridge
-    oci: PodmanSandboxExecutor
-    cursor: CursorBridge
+    synthetic: ExecutionPort
+    live: ExecutionPort
+    evidence: EvidencePort
+    repo_integration: RepositoryIntegrationPort
+    approval_provider: OwnerDecisionPort
+    openclaw: CoordinatorPort
+    acp: Any
+    gateway: Any
+    acpx: Any
+    oci: Any
+    cursor: Any
     github_transport: Optional[Any] = None
     github_token_provider: Optional[Callable[[], Optional[str]]] = None
     paperclip_transport: Optional[Any] = None

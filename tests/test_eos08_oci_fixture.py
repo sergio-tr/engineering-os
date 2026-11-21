@@ -12,11 +12,11 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from engineering_os.application.services import ControlPlane
-from engineering_os.infrastructure.acp_fixture import AcpFixturePeer
-from engineering_os.infrastructure.acp_session import AcpSessionManager
-from engineering_os.infrastructure.oci_acp_transport import OciAcpStdioTransport
-from engineering_os.infrastructure.oci_process import InjectedFixtureProcess
-from engineering_os.infrastructure.podman_executor import (
+from engineering_os.infrastructure.acp.acp_fixture import AcpFixturePeer
+from engineering_os.infrastructure.acp.sessions.acp_session import AcpSessionManager
+from engineering_os.infrastructure.runtime.oci.oci_acp_transport import OciAcpStdioTransport
+from engineering_os.infrastructure.runtime.oci.oci_process import InjectedFixtureProcess
+from engineering_os.infrastructure.runtime.oci.podman_executor import (
     FixtureLaunchRequest,
     OwnerGateError,
     PodmanSandboxExecutor,
@@ -24,7 +24,7 @@ from engineering_os.infrastructure.podman_executor import (
     default_injected_factory,
     require_owner_execution_gates,
 )
-from engineering_os.infrastructure.sqlite_repo import Repository
+from engineering_os.infrastructure.persistence.sqlite import Repository
 from engineering_os.infrastructure.evidence import SYNTHETIC_IN_MEMORY, CURSOR_ACP_LIVE
 
 
@@ -102,7 +102,7 @@ class FixturePeerTransportTests(unittest.TestCase):
         handle = InjectedFixtureProcess(scenario="timeout")
         transport = OciAcpStdioTransport(handle, read_timeout=0.05)
         # initialize still works
-        from engineering_os.infrastructure.acp_protocol import make_request, initialize_params
+        from engineering_os.infrastructure.acp.protocol.acp_protocol import make_request, initialize_params
 
         resp = transport.send(make_request("initialize", initialize_params()))
         self.assertIsNotNone(resp)

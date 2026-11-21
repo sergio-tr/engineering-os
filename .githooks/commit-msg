@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Reject forbidden automated AI attribution trailers in commit messages.
+set -euo pipefail
+ROOT="$(git rev-parse --show-toplevel)"
+exec python3 "$ROOT/scripts/check_git_metadata.py" "$1"

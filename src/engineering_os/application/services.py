@@ -44,45 +44,45 @@ from engineering_os.infrastructure.evidence import (
     UNVERIFIED,
     is_synthetic,
 )
-from engineering_os.infrastructure.github_adapter import GitHubReadOnlyRepositoryAdapter
-from engineering_os.infrastructure.github_client import (
+from engineering_os.infrastructure.integrations.github.github_adapter import GitHubReadOnlyRepositoryAdapter
+from engineering_os.infrastructure.integrations.github.github_client import (
     DEFAULT_API_BASE,
     GitHubClientError,
     GitHubReadOnlyClient,
     HttpTransport,
     parse_repository,
 )
-from engineering_os.infrastructure.acp_adapter import AcpExecutionAdapter
-from engineering_os.infrastructure.acp_session import AcpSessionManager
-from engineering_os.infrastructure.acp_transport import (
+from engineering_os.infrastructure.acp.acp_adapter import AcpExecutionAdapter
+from engineering_os.infrastructure.acp.sessions.acp_session import AcpSessionManager
+from engineering_os.infrastructure.acp.transports.acp_transport import (
     CursorAcpAdapter,
     DisabledLiveAcpTransport,
     InMemoryAcpTransport,
     OpenClawAcpxExecutionTransport,
 )
-from engineering_os.infrastructure.acpx_bridge import AcpxSandboxBridge
-from engineering_os.infrastructure.credential_provider import (
+from engineering_os.infrastructure.acp.acpx.acpx_bridge import AcpxSandboxBridge
+from engineering_os.infrastructure.security.credentials.credential_provider import (
     FixtureCursorCredentialProvider,
     UnavailableCursorCredentialProvider,
 )
-from engineering_os.infrastructure.cursor_bridge import CursorBridge, RUNTIME_MODES
-from engineering_os.infrastructure.cursor_runtime import CursorRuntimePlanner
-from engineering_os.infrastructure.network_policy import (
+from engineering_os.infrastructure.runtime.cursor.cursor_bridge import CursorBridge, RUNTIME_MODES
+from engineering_os.infrastructure.runtime.cursor.cursor_runtime import CursorRuntimePlanner
+from engineering_os.infrastructure.network.policy.network_policy import (
     FixtureAllowlistNetworkPolicy,
     UnenforcedNetworkPolicy,
 )
-from engineering_os.infrastructure.runtime_authorization import (
+from engineering_os.infrastructure.security.authorization.runtime_authorization import (
     RuntimeAuthorization,
     RuntimeAuthorizationVerifier,
 )
-from engineering_os.infrastructure.workspace_prep import WorkspacePreparer
-from engineering_os.infrastructure.gateway_client import (
+from engineering_os.infrastructure.runtime.cursor.workspace_prep import WorkspacePreparer
+from engineering_os.infrastructure.integrations.openclaw.gateway_client import (
     InMemoryGatewayTransport,
     OpenClawGatewayClient,
     default_gateway_client,
 )
-from engineering_os.infrastructure.oci_acp_transport import OciAcpStdioTransport
-from engineering_os.infrastructure.podman_executor import (
+from engineering_os.infrastructure.runtime.oci.oci_acp_transport import OciAcpStdioTransport
+from engineering_os.infrastructure.runtime.oci.podman_executor import (
     FixtureLaunchRequest,
     OwnerGateError,
     PodmanSandboxExecutor,
@@ -92,16 +92,16 @@ from engineering_os.infrastructure.podman_executor import (
     resolve_local_fixture_image,
     sha256_text,
 )
-from engineering_os.infrastructure.openclaw_adapter import OpenClawCoordinatorAdapter
-from engineering_os.infrastructure.openclaw_client import OpenClawCliClient
-from engineering_os.infrastructure.paperclip_adapter import PaperclipOrganizationAdapter
-from engineering_os.infrastructure.paperclip_client import (
+from engineering_os.infrastructure.integrations.openclaw.openclaw_adapter import OpenClawCoordinatorAdapter
+from engineering_os.infrastructure.integrations.openclaw.openclaw_client import OpenClawCliClient
+from engineering_os.infrastructure.integrations.paperclip.paperclip_adapter import PaperclipOrganizationAdapter
+from engineering_os.infrastructure.integrations.paperclip.paperclip_client import (
     DEFAULT_PAPERCLIP_URL,
     PaperclipClient,
     PaperclipClientError,
 )
-from engineering_os.infrastructure.sandbox_launcher import PodmanAcpSandboxLauncher
-from engineering_os.infrastructure.sqlite_repo import Repository, default_db_path
+from engineering_os.infrastructure.runtime.sandbox.sandbox_launcher import PodmanAcpSandboxLauncher
+from engineering_os.infrastructure.persistence.sqlite import Repository, default_db_path
 
 # Stable IDs for the persistent synthetic demonstration (idempotent seed).
 DEMO_PROJECT_ID = "proj-eos-mvp-demo"
@@ -218,7 +218,10 @@ class ControlPlane:
         self._deps = deps
         self._projects = ProjectService(self.repo, emit=self._emit)
         self._goals = GoalService(
-            self.repo, projects=self._projects, emit=self._emit
+            self.repo,
+            self.repo,
+            projects=self._projects,
+            emit=self._emit,
         )
 
     @classmethod
@@ -2307,7 +2310,7 @@ class ControlPlane:
         return self.cursor.requirements()
 
     def cursor_integration_check(self) -> Dict[str, Any]:
-        from engineering_os.infrastructure.acpx_cursor_config import (
+        from engineering_os.infrastructure.acp.acpx.acpx_cursor_config import (
             propose_acpx_cursor_agent_config,
             validate_acpx_cursor_command,
         )
@@ -2375,7 +2378,7 @@ class ControlPlane:
         authorization: Optional[RuntimeAuthorization] = None,
     ) -> Dict[str, Any]:
         """Owner smoke workflow. Live path requires triple-gate + SANDBOX PASS + auth."""
-        from engineering_os.infrastructure.cursor_smoke_workflow import CursorSmokeWorkflow
+        from engineering_os.infrastructure.runtime.cursor.cursor_smoke_workflow import CursorSmokeWorkflow
 
         project = self.create_project("Cursor Smoke", "local/cursor-smoke")
         goal = self.create_goal(project.project_id, "Cursor ACP smoke readiness")
@@ -2488,16 +2491,16 @@ class ControlPlane:
         }
 
     def network_status(self) -> Dict[str, Any]:
-        from engineering_os.infrastructure.broker_runtime import (
+        from engineering_os.infrastructure.network.broker.broker_runtime import (
             BrokerRuntime,
             proxy_compatibility_matrix,
         )
-        from engineering_os.infrastructure.egress_broker import TrustedEgressBroker
-        from engineering_os.infrastructure.egress_enforcer import (
+        from engineering_os.infrastructure.network.broker.egress_broker import TrustedEgressBroker
+        from engineering_os.infrastructure.network.policy.egress_enforcer import (
             PastaAllowlistEgressPolicy,
             select_egress_policy,
         )
-        from engineering_os.infrastructure.podman_capabilities import (
+        from engineering_os.infrastructure.runtime.oci.podman_capabilities import (
             probe_podman_capabilities,
         )
 
@@ -2538,13 +2541,13 @@ class ControlPlane:
         Default use_injected=True keeps automation/offline safe.
         Owner real Podman path: use_injected=False with triple-gate.
         """
-        from engineering_os.infrastructure.broker_runtime import BrokerRuntime
-        from engineering_os.infrastructure.network_probe_executor import (
+        from engineering_os.infrastructure.network.broker.broker_runtime import BrokerRuntime
+        from engineering_os.infrastructure.network.probe.network_probe_executor import (
             NetworkProbeExecutor,
             NetworkProbeRequest,
             default_injected_probe_factory,
         )
-        from engineering_os.infrastructure.podman_executor import (
+        from engineering_os.infrastructure.runtime.oci.podman_executor import (
             resolve_local_fixture_image,
         )
 
@@ -2621,7 +2624,7 @@ class ControlPlane:
         return payload
 
     def cursor_live_preflight(self) -> Dict[str, Any]:
-        from engineering_os.infrastructure.live_preflight import CursorLivePreflight
+        from engineering_os.infrastructure.runtime.cursor.live_preflight import CursorLivePreflight
 
         return CursorLivePreflight(
             runtime=self.cursor.runtime,
@@ -2660,8 +2663,8 @@ class ControlPlane:
 
     def owner_deployment_sequence(self) -> Dict[str, Any]:
         """Exact Owner-operated stages A–F plus legacy 8-step checklist."""
-        from engineering_os.infrastructure.deployment_stages import deployment_stages
-        from engineering_os.infrastructure.podman_capabilities import (
+        from engineering_os.infrastructure.runtime.cursor.deployment_stages import deployment_stages
+        from engineering_os.infrastructure.runtime.oci.podman_capabilities import (
             probe_podman_capabilities,
             version_tuple_to_str,
         )

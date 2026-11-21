@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import json
 import uuid
 
-from engineering_os.infrastructure.acp_protocol import (
+from engineering_os.infrastructure.acp.protocol.acp_protocol import (
     SUPPORTED_PROTOCOL_VERSION,
     make_error_response,
     make_notification,

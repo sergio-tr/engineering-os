@@ -9,30 +9,30 @@ from __future__ import annotations
 from typing import Any, Dict, Optional
 
 from engineering_os.domain.models import new_id, utc_now
-from engineering_os.infrastructure.acp_session import AcpSessionManager
-from engineering_os.infrastructure.acp_transport import (
+from engineering_os.infrastructure.acp.sessions.acp_session import AcpSessionManager
+from engineering_os.infrastructure.acp.transports.acp_transport import (
     CursorAcpAdapter,
     InMemoryAcpTransport,
 )
-from engineering_os.infrastructure.acpx_readiness import AcpxReadinessProbe
+from engineering_os.infrastructure.acp.acpx.acpx_readiness import AcpxReadinessProbe
 from engineering_os.infrastructure.adapters import DispatchRequest, DispatchResult
 from engineering_os.infrastructure.evidence import ERROR, SYNTHETIC
-from engineering_os.infrastructure.gateway_client import OpenClawGatewayClient
-from engineering_os.infrastructure.runtime_authorization import (
+from engineering_os.infrastructure.integrations.openclaw.gateway_client import OpenClawGatewayClient
+from engineering_os.infrastructure.security.authorization.runtime_authorization import (
     RuntimeAuthorization,
     RuntimeAuthorizationVerifier,
 )
-from engineering_os.infrastructure.sandbox_launcher import (
+from engineering_os.infrastructure.runtime.sandbox.sandbox_launcher import (
     PodmanAcpSandboxLauncher,
     RejectHostDirectLauncher,
     SandboxLauncher,
 )
-from engineering_os.infrastructure.sandbox_spec import (
+from engineering_os.infrastructure.runtime.sandbox.sandbox_spec import (
     SandboxExecutionSpec,
     build_default_spec,
     validate_sandbox_spec,
 )
-from engineering_os.infrastructure.sqlite_repo import Repository
+from engineering_os.infrastructure.persistence.sqlite import Repository
 
 
 class AcpxBridgeError(RuntimeError):
@@ -68,7 +68,7 @@ class AcpxSandboxBridge:
         if self.readiness_probe is not None:
             return self.readiness_probe
         if self.gateway is None:
-            from engineering_os.infrastructure.gateway_client import default_gateway_client
+            from engineering_os.infrastructure.integrations.openclaw.gateway_client import default_gateway_client
 
             self.gateway = default_gateway_client()
         return AcpxReadinessProbe(self.gateway, self.sandbox)

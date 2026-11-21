@@ -9,36 +9,36 @@ from typing import Any, Dict, List, Optional
 import hashlib
 
 from engineering_os.domain.models import new_id, utc_now
-from engineering_os.infrastructure.acp_session import AcpSessionManager
-from engineering_os.infrastructure.broker_runtime import (
+from engineering_os.infrastructure.acp.sessions.acp_session import AcpSessionManager
+from engineering_os.infrastructure.network.broker.broker_runtime import (
     BrokerRuntime,
     cursor_proxy_env,
     proxy_compatibility_matrix,
 )
-from engineering_os.infrastructure.credential_provider import (
+from engineering_os.infrastructure.security.credentials.credential_provider import (
     CredentialProvider,
     UnavailableCursorCredentialProvider,
     redact_secrets,
 )
-from engineering_os.infrastructure.cursor_launcher import (
+from engineering_os.infrastructure.runtime.cursor.cursor_launcher import (
     CursorAcpLauncher,
     CursorLaunchRequest,
     default_cursor_injected_factory,
 )
-from engineering_os.infrastructure.cursor_runtime import CursorRuntimePlanner
-from engineering_os.infrastructure.egress_enforcer import UdsBrokerEgressPolicy
+from engineering_os.infrastructure.runtime.cursor.cursor_runtime import CursorRuntimePlanner
+from engineering_os.infrastructure.network.policy.egress_enforcer import UdsBrokerEgressPolicy
 from engineering_os.infrastructure.evidence import (
     CURSOR_ACP_LIVE,
     SYNTHETIC_IN_MEMORY,
 )
-from engineering_os.infrastructure.oci_acp_transport import OciAcpStdioTransport
-from engineering_os.infrastructure.runtime_authorization import (
+from engineering_os.infrastructure.runtime.oci.oci_acp_transport import OciAcpStdioTransport
+from engineering_os.infrastructure.security.authorization.runtime_authorization import (
     AuthorizationError,
     RuntimeAuthorization,
     RuntimeAuthorizationVerifier,
 )
-from engineering_os.infrastructure.sqlite_repo import Repository
-from engineering_os.infrastructure.workspace_prep import WorkspacePreparer
+from engineering_os.infrastructure.persistence.sqlite import Repository
+from engineering_os.infrastructure.runtime.cursor.workspace_prep import WorkspacePreparer
 
 
 SMOKE_PROMPT = (

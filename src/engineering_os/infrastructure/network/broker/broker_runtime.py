@@ -16,14 +16,14 @@ import tempfile
 import threading
 
 from engineering_os.domain.models import new_id, utc_now
-from engineering_os.infrastructure.egress_broker import (
+from engineering_os.infrastructure.network.broker.egress_broker import (
     ConnectFn,
     ResolveFn,
     TrustedEgressBroker,
     blocked_connect,
     write_tcp_uds_relay_script,
 )
-from engineering_os.infrastructure.egress_enforcer import DEFAULT_CURSOR_DESTINATIONS
+from engineering_os.infrastructure.network.policy.egress_enforcer import DEFAULT_CURSOR_DESTINATIONS
 from engineering_os.infrastructure.evidence import ERROR, SYNTHETIC, UNAVAILABLE
 
 

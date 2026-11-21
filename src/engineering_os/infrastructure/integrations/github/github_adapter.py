@@ -14,7 +14,7 @@ from engineering_os.infrastructure.evidence import (
     LIVE_READ_ONLY,
     UNVERIFIED,
 )
-from engineering_os.infrastructure.github_client import (
+from engineering_os.infrastructure.integrations.github.github_client import (
     GitHubClientError,
     GitHubReadOnlyClient,
     parse_repository,

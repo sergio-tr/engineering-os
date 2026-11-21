@@ -12,28 +12,28 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from engineering_os.application.services import ControlPlane
-from engineering_os.infrastructure.broker_runtime import (
+from engineering_os.infrastructure.network.broker.broker_runtime import (
     BrokerRuntime,
     cursor_proxy_env,
     proxy_compatibility_matrix,
 )
-from engineering_os.infrastructure.cursor_smoke_workflow import SMOKE_PROMPT
-from engineering_os.infrastructure.deployment_stages import (
+from engineering_os.infrastructure.runtime.cursor.cursor_smoke_workflow import SMOKE_PROMPT
+from engineering_os.infrastructure.runtime.cursor.deployment_stages import (
     deployment_stages,
     evaluate_stage_gate,
 )
-from engineering_os.infrastructure.egress_broker import (
+from engineering_os.infrastructure.network.broker.egress_broker import (
     TrustedEgressBroker,
     blocked_connect,
 )
-from engineering_os.infrastructure.network_probe_executor import (
+from engineering_os.infrastructure.network.probe.network_probe_executor import (
     NetworkProbeExecutor,
     NetworkProbeRequest,
     build_probe_podman_argv,
     default_injected_probe_factory,
     write_probe_workload_script,
 )
-from engineering_os.infrastructure.runtime_authorization import (
+from engineering_os.infrastructure.security.authorization.runtime_authorization import (
     AuthorizationError,
     RuntimeAuthorizationVerifier,
 )
