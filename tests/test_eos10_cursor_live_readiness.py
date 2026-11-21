@@ -159,25 +159,37 @@ class CredentialTests(unittest.TestCase):
 
 
 class NetworkTests(unittest.TestCase):
-    def test_pasta_policy_bypass_attempts(self) -> None:
-        policy = PastaAllowlistEgressPolicy(
-            pasta_available=True, rootless_podman=True
-        )
-        self.assertEqual(policy.readiness()["status"], "READY")
-        self.assertTrue(policy.evaluate("api.cursor.com").allowed)
-        self.assertFalse(policy.evaluate("evil.example").allowed)
-        self.assertFalse(policy.evaluate("1.2.3.4").allowed)
-        self.assertFalse(policy.evaluate("127.0.0.1").allowed)
-        self.assertTrue(is_ip_literal("8.8.8.8"))
-        self.assertFalse(policy.evaluate("8.8.8.8").allowed)
+    def test_pasta_policy_never_enforced(self) -> None:
+        from engineering_os.infrastructure.podman_capabilities import PodmanCapabilities
 
-    def test_fail_closed_without_pasta(self) -> None:
+        caps = PodmanCapabilities(
+            podman_path="/usr/bin/podman",
+            version=(3, 4, 4),
+            rootless=True,
+            pasta_binary_present=True,
+            passt_binary_present=True,
+            pasta_network_mode_supported=False,
+            network_none_supported=True,
+        )
+        policy = PastaAllowlistEgressPolicy(
+            pasta_available=True, rootless_podman=True, capabilities=caps
+        )
+        ready = policy.readiness()
+        self.assertEqual(ready["status"], "BLOCKED")
+        self.assertEqual(ready["enforcement"], "NOT_ENFORCED")
+        self.assertFalse(policy.evaluate("api.cursor.com").allowed)
+        self.assertFalse(policy.evaluate("1.2.3.4").allowed)
+        self.assertTrue(is_ip_literal("8.8.8.8"))
+        closed = FailClosedEgressPolicy()
+        self.assertEqual(closed.readiness()["status"], "BLOCKED")
+
+    def test_fail_closed_without_broker(self) -> None:
         policy = PastaAllowlistEgressPolicy(
             pasta_available=False, rootless_podman=True
         )
         self.assertEqual(policy.readiness()["status"], "BLOCKED")
         self.assertFalse(policy.evaluate("api.cursor.com").allowed)
-        self.assertIn("passt", (policy.readiness().get("owner_action") or "").lower())
+        self.assertIn("uds", (policy.readiness().get("owner_action") or "").lower())
         closed = FailClosedEgressPolicy()
         self.assertEqual(closed.readiness()["status"], "BLOCKED")
 

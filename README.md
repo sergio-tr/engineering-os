@@ -162,14 +162,21 @@ python3 scripts/eos.py cursor deployment-sequence
 python3 scripts/eos.py runtime requirements
 ```
 
-EOS-10 adds: graceful OCI process lifecycle (protocol vs process outcomes),
-reproducible Owner image build plan/verify, runtime preflight, credential broker
-(disabled by default), pasta allowlist egress enforcer, host runtime authorization
-wiring, smoke dry-run, and orchestrator runtime modes
-(`SYNTHETIC_IN_MEMORY` / `SYNTHETIC_OCI_EXECUTED` / `CURSOR_ACP_LIVE`).
+EOS-10/11 add: graceful OCI lifecycle, image verify from local OCI inspect +
+artifact bytes, runtime/live preflight, credential broker (disabled by default),
+**UDS egress broker with `--network=none`** (Podman 3.4.4 compatible; pasta is
+NOT treated as destination enforcement), host authorization, smoke dry-run, and
+orchestrator runtime modes.
 
-Live Cursor ACP remains disabled until SANDBOX PASS + host auth + Owner triple-gate.
-Automation never builds images, launches containers, or accesses real credentials.
+```bash
+python3 scripts/eos.py network status
+python3 scripts/eos.py network probe --dry-run
+python3 scripts/eos.py cursor live-preflight
+```
+
+Live Cursor ACP remains disabled until SANDBOX PASS + host auth + Owner triple-gate
++ verified broker probe. Automation never builds images, launches containers, or
+accesses real credentials. Do not install `passt` expecting pasta on Podman 3.4.4.
 
 ## Candidate architecture (provisional)
 

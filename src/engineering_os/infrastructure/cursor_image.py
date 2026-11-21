@@ -10,15 +10,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 import hashlib
 import json
 import os
-import time
+import subprocess
 
 from engineering_os.domain.models import utc_now
 from engineering_os.infrastructure.cursor_runtime import PROFILE_PATH, load_image_profile
 from engineering_os.infrastructure.evidence import ERROR, SYNTHETIC, UNAVAILABLE
+
+InspectRunner = Callable[[str], Dict[str, Any]]
 
 
 DEFAULT_EVIDENCE_PATH = Path("var") / "cursor-image-evidence.json"
@@ -220,26 +222,191 @@ def build_plan(*, base_image_digest: Optional[str] = None) -> Dict[str, Any]:
     }
 
 
+def inspect_local_image(
+    image_ref: Optional[str] = None,
+    *,
+    inspect_runner: Optional[InspectRunner] = None,
+) -> Dict[str, Any]:
+    """Inspect a local OCI image. Does not pull. Distinguishes Id vs Digest."""
+    profile = load_image_profile()
+    ref = image_ref or str(profile.get("expected_image_ref") or "")
+    if inspect_runner is not None:
+        info = inspect_runner(ref)
+        # Allow either already-normalized or raw podman inspect-shaped payloads.
+        if info.get("local_image_id") or info.get("inspected") is True and "Id" not in info and "ID" not in info:
+            info.setdefault("image_ref", ref)
+            info.setdefault("inspected", True)
+            info.setdefault("pulled", False)
+            info.setdefault("evidence_class", "HOST_VERIFIED")
+            return info
+        image_id = info.get("local_image_id") or info.get("Id") or info.get("ID")
+        digest = info.get("registry_digest") or info.get("Digest")
+        if not digest:
+            digests = info.get("RepoDigests") or []
+            if isinstance(digests, list) and digests:
+                first = str(digests[0])
+                digest = first.split("@", 1)[-1] if "@" in first else first
+        return {
+            "image_ref": ref,
+            "inspected": True,
+            "pulled": False,
+            "local_image_id": image_id,
+            "registry_digest": digest if digest and str(digest).startswith("sha256:") else None,
+            "repo_digests": info.get("RepoDigests") or [],
+            "architecture": info.get("Architecture") or info.get("architecture"),
+            "os": info.get("Os") or info.get("os"),
+            "created": info.get("Created"),
+            "size": info.get("Size"),
+            "labels": info.get("Labels") or {},
+            "identity_note": (
+                "local_image_id is an immutable local store identity; "
+                "registry_digest may be absent for locally-built images without push"
+            ),
+            "evidence_class": "HOST_VERIFIED",
+            "user_supplied_checksum_trusted": False,
+        }
+    try:
+        proc = subprocess.run(
+            ["podman", "image", "inspect", "--format", "json", ref],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "image_ref": ref,
+            "inspected": False,
+            "pulled": False,
+            "error": str(exc),
+            "evidence_class": UNAVAILABLE,
+        }
+    if proc.returncode != 0:
+        return {
+            "image_ref": ref,
+            "inspected": False,
+            "pulled": False,
+            "error": (proc.stderr or proc.stdout or "inspect_failed").strip()[:500],
+            "evidence_class": UNAVAILABLE,
+        }
+    try:
+        payload = json.loads(proc.stdout)
+        info = payload[0] if isinstance(payload, list) and payload else payload
+    except json.JSONDecodeError as exc:
+        return {
+            "image_ref": ref,
+            "inspected": False,
+            "pulled": False,
+            "error": f"bad_json:{exc}",
+            "evidence_class": ERROR,
+        }
+    image_id = info.get("Id") or info.get("ID")
+    digest = info.get("Digest")
+    if not digest:
+        digests = info.get("Digest") or info.get("RepoDigests") or []
+        if isinstance(digests, list) and digests:
+            # RepoDigests look like localhost/name@sha256:...
+            first = str(digests[0])
+            digest = first.split("@", 1)[-1] if "@" in first else first
+    arch = info.get("Architecture") or (info.get("Os") and None)
+    return {
+        "image_ref": ref,
+        "inspected": True,
+        "pulled": False,
+        "local_image_id": image_id,
+        "registry_digest": digest if digest and str(digest).startswith("sha256:") else None,
+        "repo_digests": info.get("RepoDigests") or [],
+        "architecture": info.get("Architecture"),
+        "os": info.get("Os"),
+        "created": info.get("Created"),
+        "size": info.get("Size"),
+        "labels": info.get("Labels") or {},
+        "identity_note": (
+            "local_image_id is an immutable local store identity; "
+            "registry_digest may be absent for locally-built images without push"
+        ),
+        "evidence_class": "HOST_VERIFIED",
+        "user_supplied_checksum_trusted": False,
+    }
+
+
+def compute_file_sha256(path: Path) -> Optional[str]:
+    if not path.is_file():
+        return None
+    h = hashlib.sha256()
+    with path.open("rb") as fh:
+        while True:
+            chunk = fh.read(1024 * 1024)
+            if not chunk:
+                break
+            h.update(chunk)
+    return "sha256:" + h.hexdigest()
+
+
 def verify_image_identity(
     *,
     image_digest: Optional[str] = None,
     image_id: Optional[str] = None,
     cursor_version: Optional[str] = None,
     artifact_checksum: Optional[str] = None,
+    artifact_path: Optional[str] = None,
     base_digest: Optional[str] = None,
     architecture: str = "linux/amd64",
     write_evidence: bool = False,
     evidence_file: Optional[Path] = None,
     observed_image_present: bool = False,
+    trust_user_supplied_checksums: bool = False,
+    inspect_runner: Optional[InspectRunner] = None,
+    use_local_inspect: bool = False,
 ) -> Dict[str, Any]:
+    """Verify image identity.
+
+    User-supplied checksum strings alone are NOT trusted evidence unless the
+    Owner also provides a local artifact path whose bytes hash matches, or a
+    successful local OCI inspect result is supplied via use_local_inspect.
+    """
     profile = load_image_profile()
     expected = profile.get("expected_image_digest")
     checks: List[Dict[str, Any]] = []
+    local: Dict[str, Any] = {}
 
     def add(key: str, ok: bool, status: str, detail: Any = None) -> None:
         checks.append({"key": key, "ok": ok, "status": status, "detail": detail})
 
+    if use_local_inspect:
+        local = inspect_local_image(
+            str(profile.get("expected_image_ref") or ""),
+            inspect_runner=inspect_runner,
+        )
+        if local.get("inspected"):
+            image_id = image_id or local.get("local_image_id")
+            image_digest = image_digest or local.get("registry_digest")
+            observed_image_present = True
+            if local.get("architecture"):
+                architecture = str(local.get("architecture"))
+
+    computed_checksum = None
+    if artifact_path:
+        computed_checksum = compute_file_sha256(Path(artifact_path))
+        if computed_checksum:
+            if artifact_checksum and artifact_checksum != computed_checksum:
+                add(
+                    "artifact_checksum_mismatch",
+                    False,
+                    "BLOCKED",
+                    {"supplied": artifact_checksum, "computed": computed_checksum},
+                )
+            artifact_checksum = computed_checksum
+
     digest = image_digest
+    add(
+        "local_image_id_present",
+        bool(image_id),
+        "HOST_VERIFIED" if image_id and use_local_inspect else (
+            "OK" if image_id else "NOT_TESTED"
+        ),
+        image_id,
+    )
     add(
         "digest_present",
         bool(digest and str(digest).startswith("sha256:")),
@@ -272,14 +439,24 @@ def verify_image_identity(
         "OK" if cursor_version else "NOT_TESTED",
         cursor_version,
     )
-    add(
-        "artifact_checksum_recorded",
-        bool(artifact_checksum and str(artifact_checksum).startswith("sha256:")),
-        "OK"
-        if artifact_checksum and str(artifact_checksum).startswith("sha256:")
-        else "NOT_TESTED",
-        artifact_checksum,
+    checksum_ok = bool(
+        artifact_checksum
+        and str(artifact_checksum).startswith("sha256:")
+        and (computed_checksum is not None or trust_user_supplied_checksums)
     )
+    add(
+        "artifact_checksum_verified_from_bytes",
+        bool(computed_checksum),
+        "OK" if computed_checksum else "NOT_TESTED",
+        computed_checksum or artifact_checksum,
+    )
+    if artifact_checksum and not computed_checksum and not trust_user_supplied_checksums:
+        add(
+            "user_supplied_checksum_untrusted_alone",
+            False,
+            "BLOCKED",
+            "Provide --artifact-path so checksum is computed from bytes",
+        )
     add(
         "base_digest_recorded",
         bool(base_digest and str(base_digest).startswith("sha256:")),
@@ -292,31 +469,57 @@ def verify_image_identity(
         "HOST_VERIFIED" if observed_image_present else "NOT_TESTED",
         profile.get("expected_image_ref"),
     )
+    add(
+        "local_inspect_used",
+        bool(use_local_inspect and local.get("inspected")),
+        "HOST_VERIFIED" if local.get("inspected") else "NOT_TESTED",
+        local.get("identity_note"),
+    )
 
     blocked = [c for c in checks if not c["ok"] and c["status"] == "BLOCKED"]
-    overall = "BLOCKED" if blocked else ("READY_FOR_AUTHORIZATION" if digest else "UNAVAILABLE")
+    overall = "BLOCKED" if blocked else (
+        "READY_FOR_AUTHORIZATION" if (digest and image_id) else "UNAVAILABLE"
+    )
     record = ImageEvidenceRecord(
         base_image_ref="docker.io/library/debian:bookworm-slim",
         base_image_digest=base_digest,
         cursor_release=cursor_version,
-        cursor_artifact_checksum=artifact_checksum,
+        cursor_artifact_checksum=artifact_checksum if checksum_ok or computed_checksum else None,
         final_image_id=image_id,
         final_image_digest=digest,
         architecture=architecture,
         build_timestamp=utc_now(),
-        verification_results={"checks": checks, "overall": overall},
+        verification_results={
+            "checks": checks,
+            "overall": overall,
+            "local_inspect": local,
+            "user_supplied_checksum_trusted": bool(
+                trust_user_supplied_checksums or computed_checksum
+            ),
+        },
         profile_id=str(profile.get("profile_id")),
         evidence_class=ERROR if blocked else (SYNTHETIC if digest else UNAVAILABLE),
     )
     written = None
     if write_evidence:
-        written = str(save_image_evidence(record.to_dict(), evidence_file))
+        if blocked or not (computed_checksum or local.get("inspected")):
+            written = None
+            add(
+                "evidence_write_refused_without_host_proof",
+                False,
+                "BLOCKED",
+                "Refuse writing trusted evidence from user-supplied strings alone",
+            )
+            overall = "BLOCKED"
+        else:
+            written = str(save_image_evidence(record.to_dict(), evidence_file))
     return {
         "overall_status": overall,
         "checks": checks,
         "missing": [c["key"] for c in checks if not c["ok"]],
         "evidence": record.to_dict(),
         "evidence_written": written,
+        "local_inspect": local,
         "live_cursor_acp": False,
         "build_executed": False,
     }

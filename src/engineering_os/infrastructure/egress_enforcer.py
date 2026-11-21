@@ -1,14 +1,16 @@
-"""Concrete rootless Podman egress enforcement for Cursor ACP (EOS-10).
+"""Egress policy selection for Cursor ACP (EOS-11).
 
-Chosen approach: pasta/slirp4netns custom network with DNS allowlist + no host
-network + IP-literal deny at policy layer + fail-closed when pasta/CNI is absent.
+Primary enforceable path for Podman 3.4.4 WSL2: `--network=none` + trusted
+host-side UDS egress broker (`TrustedEgressBroker`).
 
-HTTP_PROXY / application allowlists alone are NOT treated as enforcement.
+PastaAllowlistEgressPolicy is retained only as a capability-gated option for
+Podman >= 4.4.1 and is NEVER reported ENFORCED merely because `pasta`/`passt`
+binaries exist. Pasta is not a destination deny-by-default firewall.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Set
 import ipaddress
 import re
@@ -16,6 +18,12 @@ import shutil
 
 from engineering_os.infrastructure.evidence import ERROR, SYNTHETIC, UNAVAILABLE
 from engineering_os.infrastructure.network_policy import NetworkDecision, NetworkPolicy
+from engineering_os.infrastructure.podman_capabilities import (
+    PASTA_MIN_VERSION,
+    PodmanCapabilities,
+    probe_podman_capabilities,
+    version_tuple_to_str,
+)
 
 
 DEFAULT_CURSOR_DESTINATIONS = frozenset(
@@ -36,8 +44,7 @@ def is_ip_literal(host: str) -> bool:
     candidate = host.strip().lower().split("/")[0]
     if candidate.startswith("[") and candidate.endswith("]"):
         candidate = candidate[1:-1]
-    if ":" in candidate and not candidate.count(":") == 1:
-        # IPv6
+    if ":" in candidate and candidate.count(":") != 1:
         try:
             ipaddress.ip_address(candidate.split("%")[0])
             return True
@@ -82,11 +89,7 @@ class EgressObservation:
 
 
 class PastaAllowlistEgressPolicy(NetworkPolicy):
-    """Enforceable Cursor egress via rootless pasta network + destination policy.
-
-    Podman argv uses a dedicated network (never --network=host). DNS names must
-    match the allowlist; IP literals and private ranges are denied.
-    """
+    """Legacy/optional pasta path — capability gated. Not a destination firewall."""
 
     policy_id = "pasta-allowlist-egress"
 
@@ -97,6 +100,7 @@ class PastaAllowlistEgressPolicy(NetworkPolicy):
         network_name: str = "eos-cursor-egress",
         pasta_available: Optional[bool] = None,
         rootless_podman: Optional[bool] = None,
+        capabilities: Optional[PodmanCapabilities] = None,
         host_network_forbidden: bool = True,
         max_connections: int = 32,
         connect_timeout_seconds: int = 10,
@@ -110,38 +114,52 @@ class PastaAllowlistEgressPolicy(NetworkPolicy):
         self.max_connections = max_connections
         self.connect_timeout_seconds = connect_timeout_seconds
         self._observations: List[EgressObservation] = list(observations or [])
+        self.capabilities = capabilities
         if pasta_available is None:
             pasta_available = bool(shutil.which("pasta") or shutil.which("passt"))
         self.pasta_available = bool(pasta_available)
         self.rootless_podman = rootless_podman
 
     def readiness(self) -> Dict[str, Any]:
+        caps = self.capabilities or probe_podman_capabilities()
         missing: List[str] = []
-        if not self.pasta_available:
-            missing.append("pasta_or_passt_binary")
-        if self.rootless_podman is False:
-            missing.append("rootless_podman")
-        if self.rootless_podman is None:
-            missing.append("rootless_podman_unverified")
-        status = "READY" if not missing else "BLOCKED"
-        owner_action = None
-        if "pasta_or_passt_binary" in missing:
-            owner_action = (
-                "Install passt/pasta for rootless Podman egress isolation, e.g. "
-                "`sudo apt-get install -y passt` (Debian/Ubuntu) or the distro "
-                "equivalent, then re-run `eos cursor readiness`."
+        if not caps.pasta_network_mode_supported:
+            missing.append(
+                f"pasta_requires_podman>={version_tuple_to_str(PASTA_MIN_VERSION)}"
             )
+            if caps.version:
+                missing.append(
+                    f"observed_podman_version={version_tuple_to_str(caps.version)}"
+                )
+        if not self.pasta_available and not (
+            caps.pasta_binary_present or caps.passt_binary_present
+        ):
+            missing.append("pasta_or_passt_binary")
+        if caps.rootless is False or self.rootless_podman is False:
+            missing.append("rootless_podman")
+        if caps.rootless is None and self.rootless_podman is None:
+            missing.append("rootless_podman_unverified")
+        # Pasta alone never counts as destination enforcement.
+        missing.append("pasta_is_not_destination_firewall")
+        status = "BLOCKED"
         return {
             "policy_id": self.policy_id,
             "status": status,
-            "mode": "pasta_allowlist",
-            "evidence_class": SYNTHETIC if not missing else ERROR,
+            "mode": "pasta_allowlist_unenforceable_alone",
+            "enforcement": "NOT_ENFORCED",
+            "evidence_class": ERROR,
             "allowed_destinations": sorted(self.allowed),
             "host_network": False,
             "host_network_forbidden": self.host_network_forbidden,
             "network_name": self.network_name,
-            "pasta_available": self.pasta_available,
-            "rootless_podman": self.rootless_podman,
+            "pasta_available": self.pasta_available
+            or caps.pasta_binary_present
+            or caps.passt_binary_present,
+            "pasta_network_mode_supported": caps.pasta_network_mode_supported,
+            "podman_version": version_tuple_to_str(caps.version),
+            "rootless_podman": caps.rootless
+            if caps.rootless is not None
+            else self.rootless_podman,
             "dns_allowlist_insufficient_alone": True,
             "http_proxy_insufficient_alone": True,
             "ip_literal_bypass_denied": True,
@@ -149,22 +167,138 @@ class PastaAllowlistEgressPolicy(NetworkPolicy):
             "max_connections": self.max_connections,
             "connect_timeout_seconds": self.connect_timeout_seconds,
             "missing": missing,
-            "owner_action": owner_action,
+            "owner_action": (
+                "Do not install passt expecting Podman 3.4.4 pasta support. "
+                "Use UdsBrokerEgressPolicy (--network=none + host broker) instead."
+            ),
+            "recommended_policy": "uds-broker-network-none",
             "note": (
-                "Network namespace must route only through the approved pasta path; "
-                "application HTTP_PROXY is not sufficient enforcement."
+                "Network name configuration or pasta binary presence does NOT "
+                "equal ENFORCED destination filtering."
+            ),
+        }
+
+    def evaluate(self, destination: str) -> NetworkDecision:
+        # Always deny — pasta path is not treated as enforceable.
+        decision = NetworkDecision(
+            allowed=False,
+            destination=destination,
+            reason="pasta_policy_not_enforced",
+            policy_id=self.policy_id,
+        )
+        self._observations.append(
+            EgressObservation(
+                destination=destination,
+                allowed=False,
+                reason=decision.reason,
+                enforcement="NOT_ENFORCED",
+            )
+        )
+        return decision
+
+    def observations(self) -> List[Dict[str, Any]]:
+        return [o.to_dict() for o in self._observations]
+
+    def podman_network_args(self) -> List[str]:
+        raise RuntimeError("pasta_egress_not_enforced_use_uds_broker")
+
+    def audit_evidence(self) -> Dict[str, Any]:
+        return {
+            "policy": self.readiness(),
+            "observations": self.observations(),
+            "host_network_used": False,
+            "enforcement": "NOT_ENFORCED",
+        }
+
+
+class UdsBrokerEgressPolicy(NetworkPolicy):
+    """Enforceable egress via --network=none + trusted host UDS broker."""
+
+    policy_id = "uds-broker-network-none"
+
+    def __init__(
+        self,
+        *,
+        allowed_destinations: Optional[Set[str]] = None,
+        broker_ready: bool = False,
+        broker_socket_path: Optional[str] = None,
+        capabilities: Optional[PodmanCapabilities] = None,
+        observations: Optional[List[EgressObservation]] = None,
+    ) -> None:
+        self.allowed = {
+            d.lower() for d in (allowed_destinations or DEFAULT_CURSOR_DESTINATIONS)
+        }
+        self.broker_ready = broker_ready
+        self.broker_socket_path = broker_socket_path
+        self.capabilities = capabilities
+        self._observations: List[EgressObservation] = list(observations or [])
+
+    def readiness(self) -> Dict[str, Any]:
+        caps = self.capabilities or probe_podman_capabilities()
+        missing: List[str] = []
+        if not caps.network_none_supported:
+            missing.append("network_none_unsupported")
+        if caps.rootless is False:
+            missing.append("rootless_podman")
+        if caps.rootless is None:
+            missing.append("rootless_podman_unverified")
+        if not self.broker_ready:
+            missing.append("egress_broker_not_started")
+        if not self.broker_socket_path:
+            missing.append("broker_socket_path_unset")
+        # READY only when broker is actually configured; still not ENFORCED until
+        # Owner runtime probe proves isolation.
+        if missing:
+            status = "BLOCKED"
+            enforcement = "NOT_ENFORCED"
+            evidence = ERROR
+        else:
+            status = "READY_FOR_OWNER_PROBE"
+            enforcement = "CONFIGURED_NOT_YET_PROBED"
+            evidence = SYNTHETIC
+        return {
+            "policy_id": self.policy_id,
+            "status": status,
+            "mode": "network_none_uds_broker",
+            "enforcement": enforcement,
+            "evidence_class": evidence,
+            "allowed_destinations": sorted(self.allowed),
+            "host_network": False,
+            "container_network": "none",
+            "direct_outbound_from_container": False,
+            "broker_ready": self.broker_ready,
+            "broker_socket_path_configured": bool(self.broker_socket_path),
+            "podman_version": version_tuple_to_str(caps.version),
+            "pasta_network_mode_supported": caps.pasta_network_mode_supported,
+            "http_proxy_insufficient_alone": True,
+            "ip_literal_bypass_denied": True,
+            "private_host_interface_denied": True,
+            "dns_controlled_by_broker": True,
+            "missing": missing,
+            "owner_action": (
+                "Run `eos network probe --dry-run`, then Owner-gated "
+                "`eos network probe --execute ...` after image/broker setup."
+            ),
+            "note": (
+                "ENFORCED requires successful Owner network probe evidence; "
+                "configured broker alone is not enough."
             ),
         }
 
     def evaluate(self, destination: str) -> NetworkDecision:
         host = destination.lower().split("/")[0]
-        # Strip scheme if present
         if "://" in host:
             host = host.split("://", 1)[1]
         host = host.split("@")[-1]
         host_only = host.split(":")[0].strip("[]")
-
-        if is_ip_literal(host_only):
+        if not self.broker_ready:
+            decision = NetworkDecision(
+                allowed=False,
+                destination=destination,
+                reason="egress_broker_unavailable",
+                policy_id=self.policy_id,
+            )
+        elif is_ip_literal(host_only):
             decision = NetworkDecision(
                 allowed=False,
                 destination=destination,
@@ -179,20 +313,12 @@ class PastaAllowlistEgressPolicy(NetworkPolicy):
                 policy_id=self.policy_id,
             )
         elif host_only in self.allowed or host in self.allowed:
-            if not self.pasta_available:
-                decision = NetworkDecision(
-                    allowed=False,
-                    destination=destination,
-                    reason="egress_enforcer_unavailable",
-                    policy_id=self.policy_id,
-                )
-            else:
-                decision = NetworkDecision(
-                    allowed=True,
-                    destination=destination,
-                    reason="allowlisted_via_pasta",
-                    policy_id=self.policy_id,
-                )
+            decision = NetworkDecision(
+                allowed=True,
+                destination=destination,
+                reason="allowlisted_via_uds_broker",
+                policy_id=self.policy_id,
+            )
         else:
             decision = NetworkDecision(
                 allowed=False,
@@ -214,12 +340,7 @@ class PastaAllowlistEgressPolicy(NetworkPolicy):
         return [o.to_dict() for o in self._observations]
 
     def podman_network_args(self) -> List[str]:
-        """Argv fragment for Cursor launches. Never returns host networking."""
-        ready = self.readiness()
-        if ready["status"] != "READY":
-            raise RuntimeError("egress_enforcement_unavailable")
-        # Dedicated network name; pasta is Podman's rootless default backend when present.
-        return ["--network", self.network_name]
+        return ["--network", "none"]
 
     def audit_evidence(self) -> Dict[str, Any]:
         return {
@@ -230,23 +351,28 @@ class PastaAllowlistEgressPolicy(NetworkPolicy):
 
 
 class FailClosedEgressPolicy(NetworkPolicy):
-    """Default production policy until pasta enforcer is Host-verified."""
+    """Default production policy until UDS broker is configured."""
 
     policy_id = "fail-closed-cursor-egress"
 
     def readiness(self) -> Dict[str, Any]:
+        caps = probe_podman_capabilities()
         return {
             "policy_id": self.policy_id,
             "status": "BLOCKED",
             "mode": "fail_closed",
+            "enforcement": "NOT_ENFORCED",
             "evidence_class": UNAVAILABLE,
             "host_network": False,
-            "missing": ["pasta_allowlist_enforcer_not_configured"],
+            "podman_version": version_tuple_to_str(caps.version),
+            "pasta_network_mode_supported": caps.pasta_network_mode_supported,
+            "recommended_policy": "uds-broker-network-none",
+            "missing": ["uds_broker_not_configured"],
             "owner_action": (
-                "Configure PastaAllowlistEgressPolicy after installing passt/pasta "
-                "and creating network `eos-cursor-egress`."
+                "Configure UdsBrokerEgressPolicy with --network=none; "
+                "do not rely on pasta for Podman 3.4.4."
             ),
-            "note": "Fail closed: no Cursor egress until enforcer is READY",
+            "note": "Fail closed: no Cursor egress until broker is READY_FOR_OWNER_PROBE",
         }
 
     def evaluate(self, destination: str) -> NetworkDecision:
@@ -256,3 +382,21 @@ class FailClosedEgressPolicy(NetworkPolicy):
             reason="fail_closed",
             policy_id=self.policy_id,
         )
+
+
+def select_egress_policy(
+    *,
+    capabilities: Optional[PodmanCapabilities] = None,
+    broker_ready: bool = False,
+    broker_socket_path: Optional[str] = None,
+) -> NetworkPolicy:
+    """Choose the concrete policy for this host. Prefer UDS broker on Podman 3.x."""
+    caps = capabilities or probe_podman_capabilities()
+    if broker_ready or broker_socket_path:
+        return UdsBrokerEgressPolicy(
+            broker_ready=broker_ready,
+            broker_socket_path=broker_socket_path,
+            capabilities=caps,
+        )
+    # Never auto-select pasta as ENFORCED.
+    return FailClosedEgressPolicy()
