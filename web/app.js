@@ -879,11 +879,16 @@
       const el = $("cursor-panel");
       el.classList.remove("empty");
       const missing = ((data.cursor && data.cursor.missing) || []).join(", ") || "—";
+      const img = (data.image_inspect && data.image_inspect.expected_image_ref) || "—";
+      const digest = (data.image_inspect && data.image_inspect.expected_image_digest) || "null";
       el.innerHTML = `
         <div class="row">Cursor ${badge((data.cursor && data.cursor.overall_status) || "BLOCKED")} · Live ${data.live_cursor_acp_enabled ? "ON" : "disabled"}</div>
+        <div class="meta">Image: ${escapeHtml(img)} · digest ${escapeHtml(String(digest))}</div>
         <div class="meta">Command: ${escapeHtml(((data.command && data.command.argv) || []).join(" "))}</div>
         <div class="meta">Credentials: ${escapeHtml((data.credentials && data.credentials.status) || "—")}</div>
-        <div class="meta">Network: ${escapeHtml((data.network && data.network.status) || "—")}</div>
+        <div class="meta">Egress: ${escapeHtml((data.network && data.network.status) || "—")}</div>
+        <div class="meta">Sandbox auth: ${escapeHtml(data.sandbox_authorization_status || data.sandbox_gate || "—")}</div>
+        <div class="meta">Launch eligible: ${escapeHtml(String(data.launch_eligibility))}</div>
         <div class="meta">Missing: ${escapeHtml(missing)}</div>
       `;
     } catch (err) {
@@ -900,7 +905,43 @@
         <div class="row">Requirements ${badge(data.status)}</div>
         <div class="meta">Missing: ${escapeHtml((data.missing || []).join(", ") || "none")}</div>
         <div class="meta">Live blocked: ${data.live_blocked}</div>
+        <div class="meta">Launch eligible: ${escapeHtml(String(data.launch_eligible))}</div>
       `;
+    } catch (err) {
+      toast(err.message, true);
+    }
+  });
+
+  $("btn-cursor-readiness").addEventListener("click", async () => {
+    try {
+      const data = await api("/api/cursor/readiness");
+      const el = $("cursor-panel");
+      el.classList.remove("empty");
+      const items = (data.items || [])
+        .map((i) => `<li>${escapeHtml(i.key)}: ${escapeHtml(i.status)} (${escapeHtml(i.evidence || "")})</li>`)
+        .join("");
+      el.innerHTML = `
+        <div class="row">Preflight ${badge(data.overall_status)}</div>
+        <div class="meta">Launch eligible: ${escapeHtml(String(data.launch_eligible))} · Sandbox ${escapeHtml(data.sandbox_gate || "—")}</div>
+        <ul class="list">${items}</ul>
+      `;
+    } catch (err) {
+      toast(err.message, true);
+    }
+  });
+
+  $("btn-cursor-smoke").addEventListener("click", async () => {
+    try {
+      const data = await api("/api/cursor/smoke");
+      const el = $("cursor-panel");
+      el.classList.remove("empty");
+      el.innerHTML = `
+        <div class="row">Smoke ${badge(data.action || "dry_run")}</div>
+        <div class="meta">Started: ${escapeHtml(String(data.started))} · Live ${data.live_cursor_acp ? "ON" : "disabled"}</div>
+        <div class="meta">Plan mode: ${escapeHtml(((data.plan && data.plan.mode) || "—"))}</div>
+        <div class="meta">Blocked: ${escapeHtml((((data.plan && data.plan.blocked_reasons) || []).join(", ")) || "none")}</div>
+      `;
+      toast("Cursor smoke dry-run completed");
     } catch (err) {
       toast(err.message, true);
     }

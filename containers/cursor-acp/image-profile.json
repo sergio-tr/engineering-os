@@ -1,11 +1,12 @@
 {
   "profile_id": "eos-cursor-acp-runtime-v1",
   "component": "cursor-acp-runtime",
-  "increment": "EOS-09",
+  "increment": "EOS-10",
   "containerfile": "containers/cursor-acp/Containerfile",
   "platform": "linux/amd64",
   "base_image_policy": "must_be_digest_pinned_at_build",
-  "expected_image_ref": "localhost/eos-cursor-acp-runtime:eos09",
+  "base_image_ref": "docker.io/library/debian:bookworm-slim",
+  "expected_image_ref": "localhost/eos-cursor-acp-runtime:eos10",
   "expected_image_digest": null,
   "command_candidates": [
     ["agent", "acp"],
@@ -14,13 +15,28 @@
   "non_root_uid": 65534,
   "non_root_gid": 65534,
   "read_only_rootfs": true,
-  "writable_paths": ["/runtime/home", "/runtime/cache", "/runtime/config", "/runtime/tmp", "/workspace"],
+  "writable_paths": [
+    "/runtime/home",
+    "/runtime/cache",
+    "/runtime/config",
+    "/runtime/tmp",
+    "/workspace"
+  ],
   "embedded_credentials": false,
   "automatic_updates": false,
   "network_during_build_only": true,
+  "install_sources": {
+    "installer": "https://cursor.com/install",
+    "docs": "https://cursor.com/docs/cli/installation",
+    "acp": "https://cursor.com/docs/cli/acp",
+    "auth": "https://cursor.com/docs/cli/reference/authentication",
+    "immutable_official_artifact": false
+  },
   "notes": [
     "Alpine synthetic fixture image is unsuitable for Cursor",
-    "Do not build this image during automated EOS-09 tests",
-    "Runtime must reject null/unverified digests"
+    "Do not build this image during automated EOS-10 tests",
+    "Runtime must reject null/unverified digests",
+    "Owner must pin expected_image_digest after verifying local build evidence",
+    "No floating latest tags"
   ]
 }

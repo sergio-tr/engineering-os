@@ -395,6 +395,86 @@ class SequentialOrchestrator:
         )
         return {"action": "cursor_prepared", **result}
 
+    def dispatch_runtime(
+        self,
+        project_id: str,
+        *,
+        runtime_mode: str = "SYNTHETIC_IN_MEMORY",
+    ) -> Dict[str, Any]:
+        """Explicit runtime selection for sequential orchestration (EOS-10).
+
+        Modes:
+          SYNTHETIC_IN_MEMORY — in-process ACP fixture
+          SYNTHETIC_OCI_EXECUTED — OCI fixture path (injected offline by default)
+          CURSOR_ACP_LIVE — requires Cursor auth + egress + Owner gates (blocked here)
+        """
+        from engineering_os.infrastructure.cursor_bridge import RUNTIME_MODES
+        from engineering_os.infrastructure.evidence import (
+            CURSOR_ACP_LIVE,
+            SYNTHETIC_IN_MEMORY,
+            SYNTHETIC_OCI_EXECUTED,
+        )
+
+        if runtime_mode not in RUNTIME_MODES:
+            return {
+                "action": "refused",
+                "reason": "unknown_runtime_mode",
+                "allowed": list(RUNTIME_MODES),
+            }
+        existing = self.plane.repo.get_claim(project_id)
+        if existing and existing.get("execution_id"):
+            return {
+                "action": "claim_held",
+                "execution_id": existing.get("execution_id"),
+                "runtime_mode": runtime_mode,
+            }
+        task_id = self.next_eligible_task(project_id)
+        if not task_id:
+            return {"action": "idle", "reason": "no_eligible_task", "runtime_mode": runtime_mode}
+
+        # Shared steps 1-4: resolve, validate, claim, verify requirements.
+        if runtime_mode == "SYNTHETIC_IN_MEMORY":
+            result = self.simulate_acp(project_id)
+            return {
+                "action": "dispatched",
+                "runtime_mode": runtime_mode,
+                "provenance": SYNTHETIC_IN_MEMORY,
+                "requires_cursor_auth": False,
+                "requires_egress": False,
+                **result,
+            }
+        if runtime_mode == "SYNTHETIC_OCI_EXECUTED":
+            # Offline path uses injected OCI fixture via control-plane demo/dry-run.
+            dry = self.plane.run_oci_acp_fixture(dry_run=True, use_injected=True)
+            return {
+                "action": "oci_dry_run_planned",
+                "runtime_mode": runtime_mode,
+                "provenance": SYNTHETIC_OCI_EXECUTED,
+                "requires_cursor_auth": False,
+                "requires_egress": False,
+                "note": "Owner triple-gate required for real Podman; not auto-started",
+                "dry_run": dry,
+                "task_id": task_id,
+            }
+        # CURSOR_ACP_LIVE
+        reqs = self.plane.runtime_requirements()
+        prepared = self.prepare_cursor(project_id)
+        return {
+            "action": "cursor_live_blocked",
+            "runtime_mode": runtime_mode,
+            "provenance": CURSOR_ACP_LIVE,
+            "requires_cursor_auth": True,
+            "requires_egress": True,
+            "live_blocked": True,
+            "requirements": reqs,
+            "prepared": prepared,
+            "note": (
+                "CURSOR_ACP_LIVE requires SANDBOX PASS, host authorization, "
+                "credential broker, pasta egress, verified image, and Owner triple-gate. "
+                "Successful ACP completion is not a merged GitHub PR."
+            ),
+        }
+
     def build_plan(self, project_id: str) -> Dict[str, Any]:
         """Deterministic orchestration plan from local + observed external state."""
         self.plane.get_project(project_id)
@@ -444,6 +524,7 @@ class SequentialOrchestrator:
             coordinator_reachable = bool(openclaw["status"].get("available"))
         elif openclaw.get("evidence_class") == "LIVE_READ_ONLY":
             coordinator_reachable = True
+        cursor_reqs = self.plane.runtime_requirements()
 
         return {
             "project_id": project_id,
@@ -471,6 +552,16 @@ class SequentialOrchestrator:
             "synthetic_execution_permitted": True,
             "live_execution_permitted": live_execution_permitted,
             "live_acp_enabled": False,
+            "runtime_modes": [
+                "SYNTHETIC_IN_MEMORY",
+                "SYNTHETIC_OCI_EXECUTED",
+                "CURSOR_ACP_LIVE",
+            ],
+            "cursor_requirements": {
+                "status": cursor_reqs.get("status"),
+                "missing": cursor_reqs.get("missing"),
+                "live_blocked": cursor_reqs.get("live_blocked"),
+            },
             "evidence": {
                 "paperclip": (paperclip_obs or {}).get("evidence_class"),
                 "paperclip_stale": bool((paperclip_obs or {}).get("stale")),
@@ -481,5 +572,7 @@ class SequentialOrchestrator:
                 "OpenClaw is coordinator availability only",
                 "Local execution eligibility remains authoritative",
                 "SANDBOX gate blocks live ACP regardless of Paperclip/OpenClaw status",
+                "CURSOR_ACP_LIVE is not selected by sandbox_gate string alone",
+                "Synthetic evidence must not be promoted to CURSOR_ACP_LIVE",
             ],
         }

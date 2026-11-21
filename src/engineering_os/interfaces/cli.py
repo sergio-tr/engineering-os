@@ -446,6 +446,51 @@ def cmd_cursor(args: argparse.Namespace) -> int:
             plane.close()
             raise
 
+    if cmd == "image":
+        plane = _plane(args.db)
+        try:
+            sub = args.cursor_image_cmd
+            if sub == "inspect":
+                _print(plane.cursor_image_inspect())
+                return 0
+            if sub == "build-plan":
+                _print(plane.cursor_image_plan())
+                return 0
+            if sub == "verify":
+                _print(
+                    plane.cursor_image_verify(
+                        image_digest=getattr(args, "image_digest", None),
+                        image_id=getattr(args, "image_id", None),
+                        cursor_version=getattr(args, "cursor_version", None),
+                        artifact_checksum=getattr(args, "artifact_checksum", None),
+                        base_digest=getattr(args, "base_digest", None),
+                        write_evidence=bool(getattr(args, "write_evidence", False)),
+                    )
+                )
+                return 0
+            return 2
+        finally:
+            plane.close()
+
+    if cmd == "smoke":
+        plane = _plane(args.db)
+        try:
+            execute = bool(getattr(args, "execute", False))
+            dry_run = bool(getattr(args, "dry_run", False)) or not execute
+            _print(
+                plane.cursor_smoke(
+                    dry_run=dry_run,
+                    execute=execute,
+                    allow_phase_b=bool(getattr(args, "allow_phase_b", False)),
+                    owner_authorize_runtime_execution=bool(
+                        getattr(args, "owner_authorize_runtime_execution", False)
+                    ),
+                )
+            )
+            return 0
+        finally:
+            plane.close()
+
     plane = _plane(args.db)
     try:
         if cmd == "status":
@@ -462,6 +507,21 @@ def cmd_cursor(args: argparse.Namespace) -> int:
             return 0
         if cmd == "integration-check":
             _print(plane.cursor_integration_check())
+            return 0
+        if cmd == "sessions":
+            _print(
+                {
+                    "sessions": plane.cursor_sessions(
+                        project_id=getattr(args, "project_id", None)
+                    )
+                }
+            )
+            return 0
+        if cmd == "evidence":
+            _print(plane.cursor_evidence(args.execution_id))
+            return 0
+        if cmd == "deployment-sequence":
+            _print(plane.owner_deployment_sequence())
             return 0
         return 2
     finally:
@@ -967,11 +1027,25 @@ def build_parser() -> argparse.ArgumentParser:
     c = rs.add_parser("requirements")
     c.set_defaults(func=cmd_runtime)
 
-    p = sub.add_parser("cursor", help="Cursor ACP runtime integration (EOS-09)")
+    p = sub.add_parser("cursor", help="Cursor ACP runtime integration (EOS-09/10)")
     cs = p.add_subparsers(dest="cursor_cmd", required=True)
     c = cs.add_parser("status")
     c.set_defaults(func=cmd_cursor)
-    c = cs.add_parser("image-plan")
+    c = cs.add_parser("image-plan", help="Alias for image build-plan")
+    c.set_defaults(func=cmd_cursor)
+    img = cs.add_parser("image", help="Cursor OCI image inspect/build-plan/verify")
+    imgs = img.add_subparsers(dest="cursor_image_cmd", required=True)
+    c = imgs.add_parser("inspect")
+    c.set_defaults(func=cmd_cursor)
+    c = imgs.add_parser("build-plan")
+    c.set_defaults(func=cmd_cursor)
+    c = imgs.add_parser("verify")
+    c.add_argument("--image-digest", default=None)
+    c.add_argument("--image-id", default=None)
+    c.add_argument("--cursor-version", default=None)
+    c.add_argument("--artifact-checksum", default=None)
+    c.add_argument("--base-digest", default=None)
+    c.add_argument("--write-evidence", action="store_true")
     c.set_defaults(func=cmd_cursor)
     c = cs.add_parser("readiness")
     c.set_defaults(func=cmd_cursor)
@@ -979,6 +1053,24 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--execution-id", required=True)
     c.set_defaults(func=cmd_cursor)
     c = cs.add_parser("integration-check")
+    c.set_defaults(func=cmd_cursor)
+    c = cs.add_parser("sessions")
+    c.add_argument("--project-id", default=None)
+    c.set_defaults(func=cmd_cursor)
+    c = cs.add_parser("evidence")
+    c.add_argument("execution_id")
+    c.set_defaults(func=cmd_cursor)
+    c = cs.add_parser("smoke", help="Cursor smoke dry-run or Owner-gated execute")
+    c.add_argument("--dry-run", action="store_true", default=False)
+    c.add_argument("--execute", action="store_true", default=False)
+    c.add_argument("--allow-phase-b", action="store_true", default=False)
+    c.add_argument(
+        "--owner-authorize-runtime-execution",
+        action="store_true",
+        default=False,
+    )
+    c.set_defaults(func=cmd_cursor)
+    c = cs.add_parser("deployment-sequence", help="Owner WSL2 deployment commands")
     c.set_defaults(func=cmd_cursor)
     c = cs.add_parser("demo-fixture")
     c.add_argument("--temp", action="store_true")

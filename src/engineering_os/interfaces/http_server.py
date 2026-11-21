@@ -354,6 +354,37 @@ def make_handler(state: AppState) -> Callable[..., BaseHTTPRequestHandler]:
                     status, body, ctype = _json_bytes(state.plane.cursor_image_plan())
                     self._send(status, body, ctype)
                     return
+                if path == "/api/cursor/image-inspect":
+                    status, body, ctype = _json_bytes(state.plane.cursor_image_inspect())
+                    self._send(status, body, ctype)
+                    return
+                if path == "/api/cursor/sessions":
+                    project_id = (qs.get("project_id") or [None])[0]
+                    status, body, ctype = _json_bytes(
+                        {"sessions": state.plane.cursor_sessions(project_id=project_id)}
+                    )
+                    self._send(status, body, ctype)
+                    return
+                if path.startswith("/api/cursor/evidence/"):
+                    execution_id = path.rsplit("/", 1)[-1]
+                    status, body, ctype = _json_bytes(
+                        state.plane.cursor_evidence(execution_id)
+                    )
+                    self._send(status, body, ctype)
+                    return
+                if path == "/api/cursor/deployment-sequence":
+                    status, body, ctype = _json_bytes(
+                        state.plane.owner_deployment_sequence()
+                    )
+                    self._send(status, body, ctype)
+                    return
+                if path == "/api/cursor/smoke":
+                    # Dry-run only via HTTP; execute path is CLI/Owner-only.
+                    status, body, ctype = _json_bytes(
+                        state.plane.cursor_smoke(dry_run=True)
+                    )
+                    self._send(status, body, ctype)
+                    return
                 if path == "/api/cursor/integration-check":
                     status, body, ctype = _json_bytes(
                         state.plane.cursor_integration_check()
@@ -707,12 +738,15 @@ def make_handler(state: AppState) -> Callable[..., BaseHTTPRequestHandler]:
                     )
                     self._send(status, body, ctype)
                     return
-                if path == "/api/cursor/launch":
+                if path == "/api/cursor/launch" or path == "/api/cursor/smoke/execute":
                     status, body, ctype = _json_bytes(
                         {
                             "ok": False,
                             "error": "live_cursor_acp_disabled",
-                            "note": "No live Cursor execution button/path in EOS-09",
+                            "note": (
+                                "No unrestricted live Cursor button. Owner CLI "
+                                "triple-gate + SANDBOX PASS + host auth required."
+                            ),
                         },
                         403,
                     )
