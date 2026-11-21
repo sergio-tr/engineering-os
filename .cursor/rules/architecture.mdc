@@ -1,0 +1,33 @@
+---
+description: Architectural boundaries, dependency direction, and package responsibilities
+alwaysApply: true
+---
+
+# Architecture
+
+Engineering OS follows a ports-and-adapters layout.
+
+## Layers (dependency direction)
+
+1. `interfaces/` — CLI, HTTP, dashboard. Depend on application only.
+2. `application/` — use cases, orchestration, policies. Depend on `domain/` and `ports/`.
+3. `domain/` + `ports/` — entities, states, value objects, Protocol contracts. No SQLite/HTTP/Podman/Cursor imports.
+4. `infrastructure/` — adapters implementing ports (persistence, integrations, runtime, network, security).
+
+Dependency arrows point inward. Domain must not import infrastructure or interfaces.
+
+## Composition root
+
+Construct concrete adapters only in `bootstrap.py` (or an explicit Owner/test factory). Application services receive dependencies; they do not construct GitHub, Paperclip, Podman, or Cursor clients.
+
+## ControlPlane
+
+`ControlPlane` is a compatibility facade. Business logic lives in focused application services / use cases. Do not grow it into a god class again.
+
+## Packages
+
+Prefer responsibility-oriented packages under `infrastructure/` (`persistence/`, `integrations/`, `acp/`, `runtime/`, `network/`, `security/`). Avoid `utils/`, `common/`, or `misc/` dumping grounds.
+
+## Compatibility
+
+Preserve public CLI commands, HTTP URLs/status codes, and SQLite schema unless the Owner explicitly authorizes a break. Prefer compatibility shims over silent renames.
