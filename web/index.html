@@ -102,6 +102,19 @@
     </section>
 
     <section>
+      <h2>ACPX / sandbox bridge <span class="badge">EOS-07</span></h2>
+      <p class="meta">Gateway + ACPX readiness and sandbox-enforced launcher preparation. No live execution button. OpenClaw sandbox≠ACP isolation.</p>
+      <div class="row" style="margin-bottom:0.75rem">
+        <button type="button" id="btn-runtime-status">Runtime status</button>
+        <button type="button" id="btn-sandbox-readiness">Sandbox readiness</button>
+        <button type="button" id="btn-acpx-sessions">Prepared executions</button>
+        <button type="button" id="btn-acpx-demo" class="synth">Run SYNTHETIC ACPX demo</button>
+      </div>
+      <div id="runtime-panel" class="panel empty">Load runtime status explicitly</div>
+      <ul id="acpx-prep-list" class="list"></ul>
+    </section>
+
+    <section>
       <h2>Integrations</h2>
       <div class="row" style="margin-bottom:0.75rem">
         <button type="button" id="btn-integrations">Refresh integrations overview</button>

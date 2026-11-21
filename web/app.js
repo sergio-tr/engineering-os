@@ -743,5 +743,78 @@
     }
   });
 
+  $("btn-runtime-status").addEventListener("click", async () => {
+    try {
+      const data = await api("/api/runtime/status");
+      const el = $("runtime-panel");
+      el.classList.remove("empty");
+      const acpx = data.acpx || {};
+      const missing = (acpx.missing || []).join(", ") || "—";
+      el.innerHTML = `
+        <div class="row">Overall ${badge(acpx.overall_status || "UNAVAILABLE")} · Live ${data.live_execution_enabled ? "ON" : "disabled"}</div>
+        <div class="meta">Gateway: ${escapeHtml((data.gateway && data.gateway.connection_lifecycle) || "unavailable")}</div>
+        <div class="meta">Sandbox: ${escapeHtml((data.sandbox && data.sandbox.status) || "—")}</div>
+        <div class="meta">Host direct: ${escapeHtml((data.host_direct && data.host_direct.status) || "BLOCKED")}</div>
+        <div class="meta">Missing: ${escapeHtml(missing)}</div>
+        <div class="meta">${escapeHtml(data.note || "")}</div>
+      `;
+    } catch (err) {
+      toast(err.message, true);
+    }
+  });
+
+  $("btn-sandbox-readiness").addEventListener("click", async () => {
+    try {
+      const data = await api("/api/sandbox/readiness");
+      const el = $("runtime-panel");
+      el.classList.remove("empty");
+      el.innerHTML = `
+        <div class="row">Sandbox launcher ${badge(data.status)} ${badge(data.evidence_class)}</div>
+        <div class="meta">Blocked: ${escapeHtml((data.blocked || []).join(", ") || "none")}</div>
+        <div class="meta">${escapeHtml(data.note || "")}</div>
+      `;
+    } catch (err) {
+      toast(err.message, true);
+    }
+  });
+
+  $("btn-acpx-sessions").addEventListener("click", async () => {
+    try {
+      const q = selectedProjectId
+        ? `?project_id=${encodeURIComponent(selectedProjectId)}`
+        : "";
+      const sessions = await api("/api/acpx/sessions" + q);
+      const ul = $("acpx-prep-list");
+      if (!sessions.length) {
+        ul.innerHTML = `<li class="empty">No prepared ACPX executions</li>`;
+        return;
+      }
+      ul.innerHTML = sessions
+        .map(
+          (p) => `<li>
+          <div class="row"><strong>${escapeHtml(p.preparation_id)}</strong> ${badge(p.status)} ${badge(p.mode)}</div>
+          <div class="meta">exec ${escapeHtml(p.execution_id)} · auth ${escapeHtml(p.authorization_state)}</div>
+          <div class="meta">blocked: ${escapeHtml((p.blocked_reasons || []).slice(0, 4).join(", "))}</div>
+        </li>`
+        )
+        .join("");
+    } catch (err) {
+      toast(err.message, true);
+    }
+  });
+
+  $("btn-acpx-demo").addEventListener("click", async () => {
+    try {
+      const result = await api("/api/acpx/demo", { method: "POST", body: "{}" });
+      selectedProjectId = result.project_id;
+      toast("SYNTHETIC ACPX bridge demo completed");
+      await refresh();
+      $("btn-runtime-status").click();
+      $("btn-acpx-sessions").click();
+    } catch (err) {
+      toast(err.message, true);
+    }
+  });
+
   refresh().catch((err) => toast(err.message, true));
 })();

@@ -330,6 +330,29 @@ def make_handler(state: AppState) -> Callable[..., BaseHTTPRequestHandler]:
                     )
                     self._send(status, body, ctype)
                     return
+                if path == "/api/runtime/status":
+                    status, body, ctype = _json_bytes(state.plane.runtime_status())
+                    self._send(status, body, ctype)
+                    return
+                if path == "/api/runtime/inspect":
+                    status, body, ctype = _json_bytes(state.plane.runtime_inspect())
+                    self._send(status, body, ctype)
+                    return
+                if path == "/api/sandbox/readiness":
+                    status, body, ctype = _json_bytes(state.plane.sandbox_readiness())
+                    self._send(status, body, ctype)
+                    return
+                if path == "/api/acpx/status":
+                    status, body, ctype = _json_bytes(state.plane.acpx_status())
+                    self._send(status, body, ctype)
+                    return
+                if path == "/api/acpx/sessions":
+                    project_id = (qs.get("project_id") or [None])[0]
+                    status, body, ctype = _json_bytes(
+                        state.plane.acpx_sessions(project_id)
+                    )
+                    self._send(status, body, ctype)
+                    return
                 if path == "/api/goals":
                     project_id = (qs.get("project_id") or [None])[0]
                     status, body, ctype = _json_bytes(
@@ -608,6 +631,16 @@ def make_handler(state: AppState) -> Callable[..., BaseHTTPRequestHandler]:
                     return
                 if path == "/api/acp/demo":
                     status, body, ctype = _json_bytes(state.plane.run_acp_fixture_demo())
+                    self._send(status, body, ctype)
+                    return
+                if path == "/api/acpx/demo":
+                    status, body, ctype = _json_bytes(state.plane.run_acpx_fixture_demo())
+                    self._send(status, body, ctype)
+                    return
+                if path == "/api/acpx/prepare":
+                    status, body, ctype = _json_bytes(
+                        state.plane.acpx_prepare(data["execution_id"])
+                    )
                     self._send(status, body, ctype)
                     return
                 status, body, ctype = _json_bytes(
