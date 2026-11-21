@@ -116,6 +116,12 @@ class PolicyError(ValueError):
 
 
 class ControlPlane:
+    """Compatibility facade over focused application services.
+
+    Prefer constructing via ``from_dependencies`` / ``bootstrap.open_control_plane``.
+    Legacy keyword arguments remain supported for tests and callers.
+    """
+
     def __init__(
         self,
         repo: Repository,
@@ -140,66 +146,91 @@ class ControlPlane:
         acpx_bridge: Optional[AcpxSandboxBridge] = None,
         oci_executor: Optional[PodmanSandboxExecutor] = None,
         cursor_bridge: Optional[CursorBridge] = None,
+        _deps: Optional[Any] = None,
     ) -> None:
-        self.repo = repo
-        self.synthetic = execution_adapter or SyntheticExecutionAdapter()
-        self.live = live_adapter or DisabledLiveExecutionAdapter()
-        self.evidence = evidence or LocalEvidenceAdapter()
-        self.repo_integration = repo_integration or SimulatedRepositoryIntegrationAdapter()
-        self.approval_provider = approval_provider or LocalOwnerDecisionProvider()
-        self.sandbox_gate = sandbox_gate
-        self.max_attempts = max_attempts
-        # Injected transport enables offline fixture demos/tests (no live network).
-        self._github_transport = github_transport
-        self._github_api_base = github_api_base
-        self._github_token_provider = github_token_provider or (
+        if _deps is not None:
+            self._apply_dependencies(_deps)
+            return
+
+        from engineering_os.bootstrap import build_dependencies
+        from engineering_os.config import ControlPlaneConfiguration
+
+        deps = build_dependencies(
+            repo,
+            config=ControlPlaneConfiguration(
+                sandbox_gate=sandbox_gate,
+                max_attempts=max_attempts,
+                acp_scenario=acp_scenario,
+                github_api_base=github_api_base,
+                paperclip_url=paperclip_url
+                or os.environ.get("EOS_PAPERCLIP_URL")
+                or DEFAULT_PAPERCLIP_URL,
+                paperclip_company_id=paperclip_company_id
+                or os.environ.get("EOS_PAPERCLIP_COMPANY_ID"),
+            ),
+            execution_adapter=execution_adapter,
+            live_adapter=live_adapter,
+            evidence=evidence,
+            repo_integration=repo_integration,
+            approval_provider=approval_provider,
+            github_transport=github_transport,
+            github_token_provider=github_token_provider,
+            paperclip_transport=paperclip_transport,
+            paperclip_token_provider=paperclip_token_provider,
+            openclaw_client=openclaw_client,
+            gateway_client=gateway_client,
+            acpx_bridge=acpx_bridge,
+            oci_executor=oci_executor,
+            cursor_bridge=cursor_bridge,
+        )
+        self._apply_dependencies(deps)
+
+    def _apply_dependencies(self, deps: Any) -> None:
+        from engineering_os.application.use_cases.goals import GoalService
+        from engineering_os.application.use_cases.projects import ProjectService
+
+        self.repo = deps.repo
+        self.synthetic = deps.synthetic
+        self.live = deps.live
+        self.evidence = deps.evidence
+        self.repo_integration = deps.repo_integration
+        self.approval_provider = deps.approval_provider
+        self.sandbox_gate = deps.config.sandbox_gate
+        self.max_attempts = deps.config.max_attempts
+        self._github_transport = deps.github_transport
+        self._github_api_base = deps.config.github_api_base
+        self._github_token_provider = deps.github_token_provider or (
             lambda: os.environ.get("EOS_GITHUB_TOKEN") or None
         )
-        self._paperclip_transport = paperclip_transport
-        self._paperclip_url = (
-            paperclip_url
-            or os.environ.get("EOS_PAPERCLIP_URL")
-            or DEFAULT_PAPERCLIP_URL
-        )
-        self._paperclip_token_provider = paperclip_token_provider or (
+        self._paperclip_transport = deps.paperclip_transport
+        self._paperclip_url = deps.config.paperclip_url or DEFAULT_PAPERCLIP_URL
+        self._paperclip_token_provider = deps.paperclip_token_provider or (
             lambda: os.environ.get("EOS_PAPERCLIP_TOKEN") or None
         )
-        self._paperclip_company_id = paperclip_company_id or os.environ.get(
-            "EOS_PAPERCLIP_COMPANY_ID"
+        self._paperclip_company_id = deps.config.paperclip_company_id
+        self.openclaw = deps.openclaw
+        self._acp_scenario = deps.config.acp_scenario
+        self.acp = deps.acp
+        self.gateway = deps.gateway
+        self.acpx = deps.acpx
+        self.oci = deps.oci
+        self.cursor = deps.cursor
+        self._deps = deps
+        self._projects = ProjectService(self.repo, emit=self._emit)
+        self._goals = GoalService(
+            self.repo, projects=self._projects, emit=self._emit
         )
-        self.openclaw = OpenClawCoordinatorAdapter(client=openclaw_client)
-        self._acp_scenario = acp_scenario
-        self.acp = AcpExecutionAdapter(
-            repo, sandbox_gate=sandbox_gate, synthetic_scenario=acp_scenario
-        )
-        self.gateway = gateway_client or default_gateway_client()
-        self.acpx = acpx_bridge or AcpxSandboxBridge(
-            repo,
-            gateway=self.gateway,
-            sandbox=PodmanAcpSandboxLauncher(),
-            sandbox_gate=sandbox_gate,
-        )
-        # Default executor uses injected process factory for offline safety.
-        # Real Podman requires explicit Owner gates + allow_real_podman.
-        self.oci = oci_executor or PodmanSandboxExecutor(
-            process_factory=default_injected_factory("success"),
-            allow_real_podman=False,
-            code_revision="eos08-dev",
-        )
-        self.cursor = cursor_bridge or CursorBridge(
-            repo,
-            credentials=UnavailableCursorCredentialProvider(),
-            network=UnenforcedNetworkPolicy(),
-            workspace=WorkspacePreparer(),
-            runtime=CursorRuntimePlanner(),
-            sandbox_gate=sandbox_gate,
-        )
+
+    @classmethod
+    def from_dependencies(cls, deps: Any) -> "ControlPlane":
+        return cls(deps.repo, _deps=deps)
 
     # --- factories ---
     @classmethod
     def open(cls, db_path: Optional[str | Path] = None) -> "ControlPlane":
-        path = Path(db_path) if db_path else default_db_path()
-        return cls(Repository(path))
+        from engineering_os.bootstrap import open_control_plane
+
+        return open_control_plane(db_path)
 
     def close(self) -> None:
         self.repo.close()
@@ -228,28 +259,15 @@ class ControlPlane:
     def create_project(
         self, name: str, repository_identity: str, *, project_id: Optional[str] = None
     ) -> Project:
-        project = Project(
-            project_id=project_id or new_id("proj"),
-            name=name,
-            repository_identity=repository_identity,
+        return self._projects.create(
+            name, repository_identity, project_id=project_id
         )
-        self.repo.upsert_project(project)
-        self._emit(
-            aggregate_type="project",
-            aggregate_id=project.project_id,
-            event_type="project.created",
-            payload=project.to_dict(),
-        )
-        return project
 
     def list_projects(self) -> List[Project]:
-        return self.repo.list_projects()
+        return self._projects.list()
 
     def get_project(self, project_id: str) -> Project:
-        project = self.repo.get_project(project_id)
-        if not project:
-            raise KeyError(f"unknown project: {project_id}")
-        return project
+        return self._projects.get(project_id)
 
     # --- goals ---
     def create_goal(
@@ -260,52 +278,12 @@ class ControlPlane:
         *,
         priority: int = 100,
     ) -> Goal:
-        self.get_project(project_id)
-        goal = Goal(
-            goal_id=new_id("goal"),
-            project_id=project_id,
-            title=title,
-            description=description,
-            priority=priority,
-            approval_state="PENDING",
-            lifecycle_state="DRAFT",
+        return self._goals.create(
+            project_id, title, description, priority=priority
         )
-        self.repo.insert_goal(goal)
-        self._emit(
-            aggregate_type="goal",
-            aggregate_id=goal.goal_id,
-            event_type="goal.created",
-            payload=goal.to_dict(),
-        )
-        return goal
 
     def submit_goal_for_approval(self, goal_id: str) -> Goal:
-        goal = self._require_goal(goal_id)
-        assert_transition("goal", goal.lifecycle_state, "PENDING_APPROVAL", GOAL_TRANSITIONS)
-        version = goal.version
-        goal.lifecycle_state = "PENDING_APPROVAL"
-        goal = self.repo.update_goal(goal, expected_version=version)
-        approval = Approval(
-            approval_id=new_id("appr"),
-            requested_action="approve_goal",
-            scope=f"goal:{goal.goal_id}",
-            approver_reference="owner-synthetic",
-            decision="PENDING",
-            expires_at=(datetime.now(timezone.utc) + timedelta(days=7))
-            .replace(microsecond=0)
-            .isoformat(),
-            audit_metadata={"synthetic": True},
-            goal_id=goal.goal_id,
-            project_id=goal.project_id,
-        )
-        self.repo.insert_approval(approval)
-        self._emit(
-            aggregate_type="goal",
-            aggregate_id=goal.goal_id,
-            event_type="goal.pending_approval",
-            payload={"approval_id": approval.approval_id},
-        )
-        return goal
+        return self._goals.submit_for_approval(goal_id)
 
     def approve_goal(
         self,

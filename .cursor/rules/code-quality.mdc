@@ -1,0 +1,29 @@
+---
+description: Code quality, SRP, parameter limits, and security-preserving refactor rules
+alwaysApply: true
+---
+
+# Code quality
+
+## Design
+
+- One responsibility per module/class/method.
+- Prefer composition over inheritance.
+- Prefer immutable `@dataclass(frozen=True)` value objects for cohesive parameter groups.
+- Ordinary public methods: prefer ≤5 parameters excluding `self`/`cls`.
+- Prefer methods ≤40–50 logical lines; modules preferably below ~400 lines.
+- Prefer cyclomatic complexity ≤10 for ordinary methods.
+- Guard clauses over deep nesting. No speculative factories or unused abstractions.
+
+## Refactors
+
+- Behavior-preserving by default.
+- Never bypass security boundaries, Owner gates, credential redaction, or deny-by-default network policy to “simplify” code.
+- Keep synthetic vs real evidence classes distinct.
+- Do not enable live Cursor ACP, real Podman, or real credentials in automation.
+
+## Testing
+
+- Add or update tests when changing business logic.
+- Architecture regression tests must keep failing on new layer violations.
+- Do not invent PASS without executed evidence.

@@ -1,0 +1,348 @@
+{
+  "python_files": 158,
+  "total_lines": 19984,
+  "largest_modules": [
+    {
+      "path": "engineering_os/application/services.py",
+      "lines": 2788,
+      "classes": 2,
+      "functions": 98
+    },
+    {
+      "path": "engineering_os/interfaces/cli/app.py",
+      "lines": 1268,
+      "classes": 0,
+      "functions": 34
+    },
+    {
+      "path": "engineering_os/interfaces/http_server.py",
+      "lines": 752,
+      "classes": 1,
+      "functions": 16
+    },
+    {
+      "path": "engineering_os/application/orchestrator.py",
+      "lines": 587,
+      "classes": 1,
+      "functions": 15
+    },
+    {
+      "path": "engineering_os/infrastructure/runtime/oci/oci_process.py",
+      "lines": 557,
+      "classes": 5,
+      "functions": 43
+    },
+    {
+      "path": "engineering_os/infrastructure/runtime/cursor/cursor_image.py",
+      "lines": 525,
+      "classes": 1,
+      "functions": 10
+    },
+    {
+      "path": "engineering_os/infrastructure/network/probe/network_probe_executor.py",
+      "lines": 499,
+      "classes": 4,
+      "functions": 9
+    },
+    {
+      "path": "engineering_os/infrastructure/runtime/oci/podman_executor.py",
+      "lines": 486,
+      "classes": 4,
+      "functions": 15
+    },
+    {
+      "path": "engineering_os/infrastructure/network/broker/egress_broker.py",
+      "lines": 484,
+      "classes": 3,
+      "functions": 18
+    },
+    {
+      "path": "engineering_os/infrastructure/runtime/cursor/cursor_launcher.py",
+      "lines": 482,
+      "classes": 3,
+      "functions": 9
+    },
+    {
+      "path": "engineering_os/infrastructure/runtime/cursor/cursor_bridge.py",
+      "lines": 474,
+      "classes": 1,
+      "functions": 13
+    },
+    {
+      "path": "engineering_os/infrastructure/persistence/sqlite/repositories/integrations.py",
+      "lines": 435,
+      "classes": 1,
+      "functions": 21
+    },
+    {
+      "path": "engineering_os/infrastructure/integrations/github/github_client.py",
+      "lines": 421,
+      "classes": 7,
+      "functions": 26
+    },
+    {
+      "path": "engineering_os/infrastructure/network/policy/egress_enforcer.py",
+      "lines": 402,
+      "classes": 4,
+      "functions": 18
+    },
+    {
+      "path": "engineering_os/infrastructure/acp/sessions/acp_session.py",
+      "lines": 387,
+      "classes": 2,
+      "functions": 13
+    },
+    {
+      "path": "engineering_os/infrastructure/acp/transports/acp_transport.py",
+      "lines": 371,
+      "classes": 8,
+      "functions": 26
+    },
+    {
+      "path": "engineering_os/infrastructure/acp/acpx/acpx_bridge.py",
+      "lines": 339,
+      "classes": 2,
+      "functions": 9
+    },
+    {
+      "path": "engineering_os/infrastructure/runtime/sandbox/sandbox_launcher.py",
+      "lines": 333,
+      "classes": 6,
+      "functions": 15
+    },
+    {
+      "path": "engineering_os/infrastructure/integrations/openclaw/gateway_client.py",
+      "lines": 322,
+      "classes": 4,
+      "functions": 16
+    },
+    {
+      "path": "engineering_os/infrastructure/integrations/paperclip/paperclip_client.py",
+      "lines": 322,
+      "classes": 2,
+      "functions": 21
+    }
+  ],
+  "longest_functions": [
+    {
+      "lines": 698,
+      "params": 1,
+      "complexity": 134,
+      "name": "engineering_os/interfaces/http_server.py:make_handler"
+    },
+    {
+      "lines": 364,
+      "params": 0,
+      "complexity": 1,
+      "name": "engineering_os/interfaces/cli/app.py:build_parser"
+    },
+    {
+      "lines": 346,
+      "params": 0,
+      "complexity": 78,
+      "name": "engineering_os/interfaces/http_server.py:_do_GET_locked"
+    },
+    {
+      "lines": 282,
+      "params": 7,
+      "complexity": 25,
+      "name": "engineering_os/application/services.py:run_oci_acp_fixture"
+    },
+    {
+      "lines": 236,
+      "params": 0,
+      "complexity": 34,
+      "name": "engineering_os/interfaces/http_server.py:_do_POST_locked"
+    },
+    {
+      "lines": 203,
+      "params": 5,
+      "complexity": 19,
+      "name": "engineering_os/infrastructure/network/probe/network_probe_executor.py:run"
+    },
+    {
+      "lines": 200,
+      "params": 0,
+      "complexity": 24,
+      "name": "engineering_os/infrastructure/runtime/cursor/runtime_preflight.py:run"
+    },
+    {
+      "lines": 180,
+      "params": 13,
+      "complexity": 36,
+      "name": "engineering_os/infrastructure/runtime/cursor/cursor_image.py:verify_image_identity"
+    },
+    {
+      "lines": 179,
+      "params": 0,
+      "complexity": 10,
+      "name": "engineering_os/infrastructure/runtime/cursor/live_preflight.py:run"
+    },
+    {
+      "lines": 168,
+      "params": 3,
+      "complexity": 35,
+      "name": "engineering_os/infrastructure/acp/sessions/acp_session.py:run_to_completion"
+    },
+    {
+      "lines": 143,
+      "params": 11,
+      "complexity": 11,
+      "name": "engineering_os/infrastructure/runtime/cursor/cursor_smoke_workflow.py:execute"
+    },
+    {
+      "lines": 136,
+      "params": 2,
+      "complexity": 8,
+      "name": "engineering_os/application/services.py:paperclip_sync"
+    },
+    {
+      "lines": 131,
+      "params": 1,
+      "complexity": 21,
+      "name": "engineering_os/interfaces/cli/app.py:cmd_cursor"
+    },
+    {
+      "lines": 116,
+      "params": 0,
+      "complexity": 4,
+      "name": "engineering_os/application/services.py:run_acpx_fixture_demo"
+    },
+    {
+      "lines": 110,
+      "params": 1,
+      "complexity": 17,
+      "name": "engineering_os/infrastructure/acp/transports/acp_transport.py:send"
+    },
+    {
+      "lines": 109,
+      "params": 2,
+      "complexity": 13,
+      "name": "engineering_os/application/services.py:reconcile_github_merge"
+    },
+    {
+      "lines": 106,
+      "params": 2,
+      "complexity": 37,
+      "name": "engineering_os/infrastructure/runtime/cursor/cursor_image.py:inspect_local_image"
+    },
+    {
+      "lines": 106,
+      "params": 2,
+      "complexity": 8,
+      "name": "engineering_os/infrastructure/acp/acpx/acpx_bridge.py:run_synthetic_prepared"
+    },
+    {
+      "lines": 105,
+      "params": 1,
+      "complexity": 27,
+      "name": "engineering_os/infrastructure/runtime/cursor/cursor_launcher.py:plan"
+    },
+    {
+      "lines": 105,
+      "params": 0,
+      "complexity": 1,
+      "name": "engineering_os/application/services.py:owner_deployment_sequence"
+    },
+    {
+      "lines": 104,
+      "params": 6,
+      "complexity": 14,
+      "name": "engineering_os/infrastructure/runtime/cursor/cursor_launcher.py:launch"
+    },
+    {
+      "lines": 104,
+      "params": 0,
+      "complexity": 1,
+      "name": "engineering_os/infrastructure/eos05_fixtures.py:build_paperclip_fixture_transport"
+    },
+    {
+      "lines": 103,
+      "params": 2,
+      "complexity": 1,
+      "name": "engineering_os/infrastructure/runtime/cursor/deployment_stages.py:deployment_stages"
+    },
+    {
+      "lines": 101,
+      "params": 1,
+      "complexity": 16,
+      "name": "engineering_os/application/orchestrator.py:build_plan"
+    },
+    {
+      "lines": 98,
+      "params": 10,
+      "complexity": 9,
+      "name": "engineering_os/infrastructure/runtime/cursor/cursor_bridge.py:smoke_execute"
+    }
+  ],
+  "high_parameter_functions": [
+    {
+      "params": 22,
+      "name": "engineering_os/application/services.py:__init__"
+    },
+    {
+      "params": 16,
+      "name": "engineering_os/bootstrap.py:build_dependencies"
+    },
+    {
+      "params": 14,
+      "name": "engineering_os/infrastructure/security/authorization/runtime_authorization.py:verify"
+    },
+    {
+      "params": 13,
+      "name": "engineering_os/infrastructure/runtime/cursor/cursor_image.py:verify_image_identity"
+    },
+    {
+      "params": 11,
+      "name": "engineering_os/infrastructure/runtime/cursor/cursor_smoke_workflow.py:execute"
+    },
+    {
+      "params": 10,
+      "name": "engineering_os/infrastructure/runtime/sandbox/sandbox_spec.py:build_default_spec"
+    },
+    {
+      "params": 10,
+      "name": "engineering_os/infrastructure/runtime/cursor/cursor_bridge.py:smoke_execute"
+    },
+    {
+      "params": 9,
+      "name": "engineering_os/infrastructure/runtime/oci/podman_executor.py:build_fixture_podman_argv"
+    },
+    {
+      "params": 9,
+      "name": "engineering_os/infrastructure/network/policy/egress_enforcer.py:__init__"
+    },
+    {
+      "params": 8,
+      "name": "engineering_os/infrastructure/runtime/oci/oci_acp_transport.py:__init__"
+    },
+    {
+      "params": 8,
+      "name": "engineering_os/infrastructure/runtime/cursor/runtime_preflight.py:__init__"
+    },
+    {
+      "params": 8,
+      "name": "engineering_os/infrastructure/runtime/cursor/cursor_launcher.py:build_cursor_podman_argv"
+    },
+    {
+      "params": 8,
+      "name": "engineering_os/infrastructure/runtime/cursor/cursor_launcher.py:__init__"
+    },
+    {
+      "params": 8,
+      "name": "engineering_os/infrastructure/runtime/cursor/cursor_bridge.py:__init__"
+    },
+    {
+      "params": 8,
+      "name": "engineering_os/infrastructure/network/probe/network_probe_executor.py:build_probe_podman_argv"
+    },
+    {
+      "params": 8,
+      "name": "engineering_os/infrastructure/acp/sessions/acp_session.py:create_session_record"
+    },
+    {
+      "params": 8,
+      "name": "engineering_os/infrastructure/acp/acpx/acpx_readiness.py:__init__"
+    }
+  ]
+}
