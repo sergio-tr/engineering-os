@@ -7,4 +7,6 @@ from typing import Any, Dict, Protocol, runtime_checkable
 
 @runtime_checkable
 class OwnerDecisionPort(Protocol):
-    def decide(self, approval: Any) -> Dict[str, Any]: ...
+    def decide(
+        self, *, action: str, scope: str, approver: str, approve: bool
+    ) -> Dict[str, Any]: ...

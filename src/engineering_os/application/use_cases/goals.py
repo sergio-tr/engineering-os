@@ -8,18 +8,23 @@ from typing import Callable, Optional
 from engineering_os.application.use_cases.projects import ProjectService
 from engineering_os.domain.models import Approval, Goal, OperationalEvent, new_id
 from engineering_os.domain.states import GOAL_TRANSITIONS, assert_transition
-from engineering_os.infrastructure.sqlite_repo import Repository
+from engineering_os.ports.persistence import (
+    ApprovalRepositoryPort,
+    GoalRepositoryPort,
+)
 
 
 class GoalService:
     def __init__(
         self,
-        repo: Repository,
+        goals: GoalRepositoryPort,
+        approvals: ApprovalRepositoryPort,
         *,
         projects: ProjectService,
         emit: Callable[..., OperationalEvent],
     ) -> None:
-        self._repo = repo
+        self._goals = goals
+        self._approvals = approvals
         self._projects = projects
         self._emit = emit
 
@@ -41,7 +46,7 @@ class GoalService:
             approval_state="PENDING",
             lifecycle_state="DRAFT",
         )
-        self._repo.insert_goal(goal)
+        self._goals.insert_goal(goal)
         self._emit(
             aggregate_type="goal",
             aggregate_id=goal.goal_id,
@@ -51,7 +56,7 @@ class GoalService:
         return goal
 
     def require(self, goal_id: str) -> Goal:
-        goal = self._repo.get_goal(goal_id)
+        goal = self._goals.get_goal(goal_id)
         if not goal:
             raise KeyError(f"unknown goal: {goal_id}")
         return goal
@@ -63,7 +68,7 @@ class GoalService:
         )
         version = goal.version
         goal.lifecycle_state = "PENDING_APPROVAL"
-        goal = self._repo.update_goal(goal, expected_version=version)
+        goal = self._goals.update_goal(goal, expected_version=version)
         approval = Approval(
             approval_id=new_id("appr"),
             requested_action="approve_goal",
@@ -77,7 +82,7 @@ class GoalService:
             goal_id=goal.goal_id,
             project_id=goal.project_id,
         )
-        self._repo.insert_approval(approval)
+        self._approvals.insert_approval(approval)
         self._emit(
             aggregate_type="goal",
             aggregate_id=goal.goal_id,
