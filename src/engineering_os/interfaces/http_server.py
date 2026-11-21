@@ -330,26 +330,6 @@ def make_handler(state: AppState) -> Callable[..., BaseHTTPRequestHandler]:
                     )
                     self._send(status, body, ctype)
                     return
-                if path == "/api/runtime/status":
-                    status, body, ctype = _json_bytes(state.plane.runtime_status())
-                    self._send(status, body, ctype)
-                    return
-                if path == "/api/runtime/inspect":
-                    status, body, ctype = _json_bytes(state.plane.runtime_inspect())
-                    self._send(status, body, ctype)
-                    return
-                if path == "/api/runtime/requirements":
-                    status, body, ctype = _json_bytes(state.plane.runtime_requirements())
-                    self._send(status, body, ctype)
-                    return
-                if path == "/api/cursor/status":
-                    status, body, ctype = _json_bytes(state.plane.cursor_status())
-                    self._send(status, body, ctype)
-                    return
-                if path == "/api/cursor/readiness":
-                    status, body, ctype = _json_bytes(state.plane.cursor_readiness())
-                    self._send(status, body, ctype)
-                    return
                 if path == "/api/cursor/image-plan":
                     status, body, ctype = _json_bytes(state.plane.cursor_image_plan())
                     self._send(status, body, ctype)
@@ -358,53 +338,16 @@ def make_handler(state: AppState) -> Callable[..., BaseHTTPRequestHandler]:
                     status, body, ctype = _json_bytes(state.plane.cursor_image_inspect())
                     self._send(status, body, ctype)
                     return
-                if path == "/api/cursor/sessions":
-                    project_id = (qs.get("project_id") or [None])[0]
-                    status, body, ctype = _json_bytes(
-                        {"sessions": state.plane.cursor_sessions(project_id=project_id)}
-                    )
-                    self._send(status, body, ctype)
-                    return
-                if path.startswith("/api/cursor/evidence/"):
-                    execution_id = path.rsplit("/", 1)[-1]
-                    status, body, ctype = _json_bytes(
-                        state.plane.cursor_evidence(execution_id)
-                    )
-                    self._send(status, body, ctype)
-                    return
-                if path == "/api/cursor/deployment-sequence":
-                    status, body, ctype = _json_bytes(
-                        state.plane.owner_deployment_sequence()
-                    )
-                    self._send(status, body, ctype)
-                    return
-                if path == "/api/cursor/live-preflight":
-                    status, body, ctype = _json_bytes(
-                        state.plane.cursor_live_preflight()
-                    )
-                    self._send(status, body, ctype)
-                    return
-                if path == "/api/network/status":
-                    status, body, ctype = _json_bytes(state.plane.network_status())
-                    self._send(status, body, ctype)
-                    return
-                if path == "/api/network/probe":
-                    status, body, ctype = _json_bytes(
-                        state.plane.network_probe(dry_run=True)
-                    )
-                    self._send(status, body, ctype)
-                    return
-                if path == "/api/cursor/smoke":
-                    # Dry-run only via HTTP; execute path is CLI/Owner-only.
-                    status, body, ctype = _json_bytes(
-                        state.plane.cursor_smoke(dry_run=True)
-                    )
-                    self._send(status, body, ctype)
-                    return
-                if path == "/api/cursor/integration-check":
-                    status, body, ctype = _json_bytes(
-                        state.plane.cursor_integration_check()
-                    )
+                from engineering_os.interfaces.http.routes import dispatch_get
+
+                routed = dispatch_get(
+                    path,
+                    qs=qs,
+                    plane=state.plane,
+                    helpers={"json_bytes": _json_bytes},
+                )
+                if routed is not None:
+                    status, body, ctype = routed
                     self._send(status, body, ctype)
                     return
                 if path == "/api/sandbox/readiness":
