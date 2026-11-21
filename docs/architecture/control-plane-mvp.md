@@ -128,6 +128,20 @@ ACP isolation evidence. Direct host Cursor ACP and unauthenticated launches stay
 
 HTTP API exposes readiness/history/offline demo only; real OCI launch is CLI/Owner-only.
 
+## Cursor ACP runtime integration (EOS-09)
+
+Preparation path for real Cursor ACP inside the same Podman boundary:
+
+- `containers/cursor-acp/Containerfile` + `image-profile.json` (definition only; no build)
+- Command mapping from verified profile (`agent acp` / `cursor-agent acp`)
+- Credential provider interface (`CURSOR_API_KEY`) without secret persistence
+- Network policy interface (deny-all / unenforced blocked / fixture allowlist)
+- Disposable workspace preparation under `/tmp/eos-workspaces`
+- ACPX command proposal that routes through the EOS sandbox launcher
+- Durable `cursor_preparations` records and offline `eos cursor demo-fixture`
+
+Live Cursor ACP launch remains disabled. SANDBOX is not declared PASS.
+
 ## Assumptions
 
 - Python ≥ 3.10 standard library only (no third-party runtime dependencies)

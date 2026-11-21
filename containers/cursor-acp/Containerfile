@@ -1,0 +1,43 @@
+# Engineering OS — Cursor ACP runtime image (EOS-09)
+# DEFINITION ONLY. Do not build during automated increments.
+# Expected to be built later under Owner control with a pinned digest.
+#
+# Goals:
+# - Reproducible Cursor CLI ACP entrypoint inside rootless Podman
+# - Non-root identity, read-only rootfs compatible
+# - No embedded credentials, no auto-update, no network during app execution
+#
+# Base image must be pinned by digest at build time by the Owner.
+# ARG BASE_IMAGE is a placeholder — reject unverified digests at runtime.
+
+ARG BASE_IMAGE=docker.io/library/debian:bookworm-slim
+FROM ${BASE_IMAGE}
+
+LABEL org.engineering-os.component="cursor-acp-runtime" \
+      org.engineering-os.increment="EOS-09" \
+      org.engineering-os.note="Not the Alpine synthetic fixture image"
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    HOME=/runtime/home \
+    XDG_CACHE_HOME=/runtime/cache \
+    XDG_CONFIG_HOME=/runtime/config \
+    PATH=/usr/local/bin:/usr/bin:/bin
+
+# Minimal writable runtime dirs for a read-only rootfs launch profile.
+RUN mkdir -p /runtime/home /runtime/cache /runtime/config /runtime/tmp /workspace \
+    && chmod 755 /runtime /workspace
+
+# Cursor CLI installation is intentionally NOT performed here.
+# Owner build steps must:
+# 1. Install a verified Cursor CLI / agent binary from an approved source
+# 2. Record the exact version and checksum
+# 3. Confirm `agent acp` or `cursor-agent acp` works offline for --help
+# 4. Publish an image digest and configure Engineering OS to require it
+
+USER 65534:65534
+WORKDIR /workspace
+
+# Default entrypoint candidates (resolved by Engineering OS image profile):
+#   agent acp
+#   cursor-agent acp
+CMD ["agent", "acp"]

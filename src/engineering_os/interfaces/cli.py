@@ -404,6 +404,65 @@ def cmd_runtime(args: argparse.Namespace) -> int:
         if args.runtime_cmd == "inspect":
             _print(plane.runtime_inspect())
             return 0
+        if args.runtime_cmd == "requirements":
+            _print(plane.runtime_requirements())
+            return 0
+        return 2
+    finally:
+        plane.close()
+
+
+def cmd_cursor(args: argparse.Namespace) -> int:
+    cmd = args.cursor_cmd
+    if cmd == "demo-fixture":
+        import tempfile
+
+        path = Path(args.db) if args.db else default_db_path()
+        if args.temp:
+            path = Path(tempfile.mkdtemp(prefix="eos-cursor-")) / "demo.sqlite3"
+        plane = ControlPlane.open(path)
+        try:
+            result = plane.run_cursor_fixture_demo()
+            plane.close()
+            plane2 = ControlPlane.open(path)
+            try:
+                preps = plane2.repo.list_cursor_preparations(
+                    project_id=result["project_id"]
+                )
+                result["restart"] = {
+                    "preparations": len(preps),
+                    "status": preps[0]["status"] if preps else None,
+                    "no_duplicate_active": len(
+                        [p for p in preps if p["status"] in {"MOCK_RUNNING"}]
+                    )
+                    == 0,
+                }
+                result["db_path"] = str(path)
+                _print(result)
+                return 0
+            finally:
+                plane2.close()
+        except Exception:
+            plane.close()
+            raise
+
+    plane = _plane(args.db)
+    try:
+        if cmd == "status":
+            _print(plane.cursor_status())
+            return 0
+        if cmd == "image-plan":
+            _print(plane.cursor_image_plan())
+            return 0
+        if cmd == "readiness":
+            _print(plane.cursor_readiness())
+            return 0
+        if cmd == "session-plan":
+            _print(plane.cursor_session_plan(args.execution_id))
+            return 0
+        if cmd == "integration-check":
+            _print(plane.cursor_integration_check())
+            return 0
         return 2
     finally:
         plane.close()
@@ -484,7 +543,6 @@ def cmd_acpx(args: argparse.Namespace) -> int:
         try:
             result = plane.run_acpx_fixture_demo()
             project_id = result["project_id"]
-            execution_id = result["prepared"]["execution"]["execution_id"]
             plane.close()
             plane2 = ControlPlane.open(path)
             try:
@@ -900,12 +958,31 @@ def build_parser() -> argparse.ArgumentParser:
     c = ac.add_parser("reject-live")
     c.set_defaults(func=cmd_acp)
 
-    p = sub.add_parser("runtime", help="Runtime readiness (EOS-07)")
+    p = sub.add_parser("runtime", help="Runtime readiness (EOS-07/09)")
     rs = p.add_subparsers(dest="runtime_cmd", required=True)
     c = rs.add_parser("status")
     c.set_defaults(func=cmd_runtime)
     c = rs.add_parser("inspect")
     c.set_defaults(func=cmd_runtime)
+    c = rs.add_parser("requirements")
+    c.set_defaults(func=cmd_runtime)
+
+    p = sub.add_parser("cursor", help="Cursor ACP runtime integration (EOS-09)")
+    cs = p.add_subparsers(dest="cursor_cmd", required=True)
+    c = cs.add_parser("status")
+    c.set_defaults(func=cmd_cursor)
+    c = cs.add_parser("image-plan")
+    c.set_defaults(func=cmd_cursor)
+    c = cs.add_parser("readiness")
+    c.set_defaults(func=cmd_cursor)
+    c = cs.add_parser("session-plan")
+    c.add_argument("--execution-id", required=True)
+    c.set_defaults(func=cmd_cursor)
+    c = cs.add_parser("integration-check")
+    c.set_defaults(func=cmd_cursor)
+    c = cs.add_parser("demo-fixture")
+    c.add_argument("--temp", action="store_true")
+    c.set_defaults(func=cmd_cursor)
 
     p = sub.add_parser("sandbox", help="Sandbox launcher / OCI fixture (EOS-07/08)")
     ss = p.add_subparsers(dest="sandbox_cmd", required=True)

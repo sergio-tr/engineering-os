@@ -147,6 +147,22 @@ The first real workload is a minimal NDJSON ACP fixture (not Cursor). Provenance
 `SYNTHETIC_OCI_EXECUTED` for real Podman runs and `SYNTHETIC_IN_MEMORY` for injected
 tests. `CURSOR_ACP_LIVE` remains unused. HTTP/dashboard never expose real OCI launch.
 
+### Cursor ACP runtime (EOS-09)
+
+```bash
+python3 scripts/eos.py cursor demo-fixture --temp
+python3 scripts/eos.py cursor status
+python3 scripts/eos.py cursor image-plan
+python3 scripts/eos.py cursor readiness
+python3 scripts/eos.py cursor integration-check
+python3 scripts/eos.py runtime requirements
+```
+
+Defines a reproducible Cursor OCI image profile (`containers/cursor-acp/`), credential
+and network fail-closed boundaries, ACPX launcher command proposal, and workspace
+preparation. Live Cursor ACP remains disabled; no image build or credential use in
+automation.
+
 ## Candidate architecture (provisional)
 
 The priority candidate chain is:

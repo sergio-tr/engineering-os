@@ -1,0 +1,26 @@
+{
+  "profile_id": "eos-cursor-acp-runtime-v1",
+  "component": "cursor-acp-runtime",
+  "increment": "EOS-09",
+  "containerfile": "containers/cursor-acp/Containerfile",
+  "platform": "linux/amd64",
+  "base_image_policy": "must_be_digest_pinned_at_build",
+  "expected_image_ref": "localhost/eos-cursor-acp-runtime:eos09",
+  "expected_image_digest": null,
+  "command_candidates": [
+    ["agent", "acp"],
+    ["cursor-agent", "acp"]
+  ],
+  "non_root_uid": 65534,
+  "non_root_gid": 65534,
+  "read_only_rootfs": true,
+  "writable_paths": ["/runtime/home", "/runtime/cache", "/runtime/config", "/runtime/tmp", "/workspace"],
+  "embedded_credentials": false,
+  "automatic_updates": false,
+  "network_during_build_only": true,
+  "notes": [
+    "Alpine synthetic fixture image is unsuitable for Cursor",
+    "Do not build this image during automated EOS-09 tests",
+    "Runtime must reject null/unverified digests"
+  ]
+}

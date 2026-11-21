@@ -873,5 +873,50 @@
     }
   });
 
+  $("btn-cursor-status").addEventListener("click", async () => {
+    try {
+      const data = await api("/api/cursor/status");
+      const el = $("cursor-panel");
+      el.classList.remove("empty");
+      const missing = ((data.cursor && data.cursor.missing) || []).join(", ") || "—";
+      el.innerHTML = `
+        <div class="row">Cursor ${badge((data.cursor && data.cursor.overall_status) || "BLOCKED")} · Live ${data.live_cursor_acp_enabled ? "ON" : "disabled"}</div>
+        <div class="meta">Command: ${escapeHtml(((data.command && data.command.argv) || []).join(" "))}</div>
+        <div class="meta">Credentials: ${escapeHtml((data.credentials && data.credentials.status) || "—")}</div>
+        <div class="meta">Network: ${escapeHtml((data.network && data.network.status) || "—")}</div>
+        <div class="meta">Missing: ${escapeHtml(missing)}</div>
+      `;
+    } catch (err) {
+      toast(err.message, true);
+    }
+  });
+
+  $("btn-cursor-reqs").addEventListener("click", async () => {
+    try {
+      const data = await api("/api/runtime/requirements");
+      const el = $("cursor-panel");
+      el.classList.remove("empty");
+      el.innerHTML = `
+        <div class="row">Requirements ${badge(data.status)}</div>
+        <div class="meta">Missing: ${escapeHtml((data.missing || []).join(", ") || "none")}</div>
+        <div class="meta">Live blocked: ${data.live_blocked}</div>
+      `;
+    } catch (err) {
+      toast(err.message, true);
+    }
+  });
+
+  $("btn-cursor-demo").addEventListener("click", async () => {
+    try {
+      const result = await api("/api/cursor/demo", { method: "POST", body: "{}" });
+      selectedProjectId = result.project_id;
+      toast("Cursor offline demo completed");
+      await refresh();
+      $("btn-cursor-status").click();
+    } catch (err) {
+      toast(err.message, true);
+    }
+  });
+
   refresh().catch((err) => toast(err.message, true));
 })();

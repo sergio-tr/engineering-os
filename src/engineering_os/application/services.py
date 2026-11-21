@@ -61,6 +61,17 @@ from engineering_os.infrastructure.acp_transport import (
     OpenClawAcpxExecutionTransport,
 )
 from engineering_os.infrastructure.acpx_bridge import AcpxSandboxBridge
+from engineering_os.infrastructure.credential_provider import (
+    FixtureCursorCredentialProvider,
+    UnavailableCursorCredentialProvider,
+)
+from engineering_os.infrastructure.cursor_bridge import CursorBridge
+from engineering_os.infrastructure.cursor_runtime import CursorRuntimePlanner
+from engineering_os.infrastructure.network_policy import (
+    FixtureAllowlistNetworkPolicy,
+    UnenforcedNetworkPolicy,
+)
+from engineering_os.infrastructure.workspace_prep import WorkspacePreparer
 from engineering_os.infrastructure.gateway_client import (
     InMemoryGatewayTransport,
     OpenClawGatewayClient,
@@ -127,6 +138,7 @@ class ControlPlane:
         gateway_client: Optional[OpenClawGatewayClient] = None,
         acpx_bridge: Optional[AcpxSandboxBridge] = None,
         oci_executor: Optional[PodmanSandboxExecutor] = None,
+        cursor_bridge: Optional[CursorBridge] = None,
     ) -> None:
         self.repo = repo
         self.synthetic = execution_adapter or SyntheticExecutionAdapter()
@@ -172,6 +184,14 @@ class ControlPlane:
             process_factory=default_injected_factory("success"),
             allow_real_podman=False,
             code_revision="eos08-dev",
+        )
+        self.cursor = cursor_bridge or CursorBridge(
+            repo,
+            credentials=UnavailableCursorCredentialProvider(),
+            network=UnenforcedNetworkPolicy(),
+            workspace=WorkspacePreparer(),
+            runtime=CursorRuntimePlanner(),
+            sandbox_gate=sandbox_gate,
         )
 
     # --- factories ---
@@ -1973,24 +1993,26 @@ class ControlPlane:
         Offline demos/tests pass use_injected=True to keep the process factory.
         """
         owner_real = bool(execute and not dry_run and not use_injected)
+        probe = probe_podman_runtime()
+        if image_ref in {"localhost/alpine:eos-fixture", "", None}:
+            image_ref = (
+                probe.get("image_ref")
+                or resolve_local_fixture_image()
+                or "localhost/alpine:eos-fixture"
+            )
         if owner_real:
             require_owner_execution_gates(
                 execute=execute,
                 allow_phase_b=allow_phase_b,
                 owner_authorize_runtime_execution=owner_authorize_runtime_execution,
             )
-            # Owner triple-gate selects the real Podman path (not injected).
-            probe = probe_podman_runtime()
-            resolved = image_ref
-            if resolved in {"localhost/alpine:eos-fixture", "", None}:
-                resolved = probe.get("image_ref") or resolve_local_fixture_image()
-            if not resolved:
+            if image_ref == "localhost/alpine:eos-fixture" or not image_ref:
                 raise PolicyError("required_local_alpine_or_busybox_image_absent")
             if probe.get("rootless") is not True:
                 raise PolicyError(
                     f"podman_rootless_required:{probe.get('rootless')}:{probe.get('error')}"
                 )
-            image_ref = resolved
+            # Owner triple-gate selects the real Podman path (not injected).
             self.oci = PodmanSandboxExecutor(
                 process_factory=None,
                 allow_real_podman=True,
@@ -2233,6 +2255,113 @@ class ControlPlane:
             "dry_plan": self.sandbox_fixture_plan(image_ref="localhost/alpine:eos-fixture"),
             "live_cursor_acp": False,
             "note": "Injected OCI process only; no Podman/containers started",
+        }
+
+    # --- EOS-09 Cursor runtime ---
+    def cursor_status(self) -> Dict[str, Any]:
+        return self.cursor.status()
+
+    def cursor_image_plan(self) -> Dict[str, Any]:
+        return self.cursor.runtime.image_plan()
+
+    def cursor_readiness(self) -> Dict[str, Any]:
+        return self.cursor.runtime.readiness().to_dict()
+
+    def runtime_requirements(self) -> Dict[str, Any]:
+        return self.cursor.requirements()
+
+    def cursor_integration_check(self) -> Dict[str, Any]:
+        from engineering_os.infrastructure.acpx_cursor_config import (
+            propose_acpx_cursor_agent_config,
+            validate_acpx_cursor_command,
+        )
+
+        proposal = propose_acpx_cursor_agent_config()
+        return {
+            "proposal": proposal,
+            "validation": validate_acpx_cursor_command(proposal["proposed_command"]),
+            "direct_host_rejected": validate_acpx_cursor_command(
+                ["cursor-agent", "acp"]
+            ),
+            "requirements": self.runtime_requirements(),
+            "live_cursor_acp": False,
+        }
+
+    def cursor_session_plan(self, execution_id: str) -> Dict[str, Any]:
+        execution = self.repo.get_execution(execution_id)
+        if not execution:
+            raise KeyError(f"unknown execution: {execution_id}")
+        return self.cursor.prepare_session(
+            execution_id=execution.execution_id,
+            project_id=execution.project_id,
+            task_id=execution.task_id,
+            correlation_id=execution.idempotency_key,
+        )
+
+    def prepare_cursor_task(self, task_id: str) -> Dict[str, Any]:
+        execution = self.prepare_synthetic_execution(task_id)
+        prepared = self.cursor.prepare_session(
+            execution_id=execution.execution_id,
+            project_id=execution.project_id,
+            task_id=execution.task_id,
+            correlation_id=execution.idempotency_key,
+        )
+        self._emit(
+            aggregate_type="execution",
+            aggregate_id=execution.execution_id,
+            event_type="execution.cursor_prepared",
+            payload={
+                "preparation_id": prepared["preparation"]["preparation_id"],
+                "live_blocked": True,
+                "blockers": prepared["preparation"].get("blockers_json"),
+            },
+        )
+        return {
+            "execution": execution.to_dict(),
+            "prepared": prepared,
+            "mode": "READY_FOR_AUTHORIZATION",
+            "live_cursor_acp": False,
+        }
+
+    def run_cursor_fixture_demo(self) -> Dict[str, Any]:
+        """Offline Cursor integration demo with fixture credentials/network."""
+        self.cursor = CursorBridge(
+            self.repo,
+            credentials=FixtureCursorCredentialProvider(),
+            network=FixtureAllowlistNetworkPolicy(),
+            workspace=WorkspacePreparer(),
+            runtime=CursorRuntimePlanner(
+                image_digest="sha256:" + ("f" * 64),
+                image_present=True,
+                cursor_version="fixture-0.0.0",
+                available_binaries=["agent", "cursor-agent"],
+            ),
+            sandbox_gate=self.sandbox_gate,
+        )
+        project = self.create_project("Cursor Runtime Demo", "local/cursor-demo")
+        goal = self.create_goal(project.project_id, "Prepare Cursor ACP runtime")
+        t1 = self.create_task(goal.goal_id, "Cursor preparation task")
+        t2 = self.create_task(
+            goal.goal_id, "Follow-up after cursor prep", depends_on=[t1.task_id]
+        )
+        self.approve_goal(goal.goal_id)
+        prepared = self.prepare_cursor_task(t1.task_id)
+        demo = self.cursor.run_demo_synthetic(prepared["prepared"]["preparation"])
+        # Live remains blocked
+        reqs = self.runtime_requirements()
+        denied = self.cursor.network.evaluate("evil.example")
+        return {
+            "mode": "CURSOR_FIXTURE_OFFLINE",
+            "project_id": project.project_id,
+            "task1_id": t1.task_id,
+            "task2_id": t2.task_id,
+            "prepared": prepared,
+            "demo": demo,
+            "requirements": reqs,
+            "unauthorized_egress_denied": denied.to_dict(),
+            "integration_check": self.cursor_integration_check(),
+            "live_cursor_acp": False,
+            "note": "No Cursor/OpenClaw/containers/network/credentials used",
         }
 
     # --- helpers ---
