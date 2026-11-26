@@ -12,6 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 import errno
+import re
 import socket
 import ssl
 import time
@@ -40,6 +41,7 @@ FAILURE_RELAY_NOT_READY = "relay_not_ready"
 FAILURE_CONNECT_DENIED = "connect_denied"
 FAILURE_CONNECT_BAD_GATEWAY = "connect_bad_gateway"
 FAILURE_CONNECT_UNEXPECTED = "connect_unexpected_status"
+FAILURE_BROKER_REQUEST_ID = "invalid_broker_request_id"
 FAILURE_TLS = "tls_handshake_failed"
 FAILURE_CERT = "certificate_validation_failed"
 FAILURE_HTTP = "http_exchange_failed"
@@ -81,6 +83,7 @@ class TransportProbeResult:
     transport_verified: bool = False
     failure_stage: Optional[str] = None
     failure_code: Optional[str] = None
+    broker_request_id: Optional[str] = None
 
     def record(self, code: str, ok: bool, detail: str = "") -> None:
         self.events.append(StageEvent(code=code, ok=ok, detail=detail))
@@ -91,6 +94,7 @@ class TransportProbeResult:
     def to_dict(self) -> Dict[str, Any]:
         return {
             "request_id": self.request_id,
+            "broker_request_id": self.broker_request_id,
             "host": self.host,
             "port": self.port,
             "events": [e.to_dict() for e in self.events],
@@ -150,31 +154,61 @@ def wait_tcp_ready(
     return False, f"not_ready:{last}"
 
 
-def _recv_until(sock: socket.socket, marker: bytes, *, limit: int = 65536) -> bytes:
-    buf = bytearray()
+def _recv_until(
+    sock: socket.socket, marker: bytes, *, limit: int = 65536, initial: bytes = b""
+) -> bytes:
+    buf = bytearray(initial)
     while marker not in buf and len(buf) < limit:
-        chunk = sock.recv(4096)
+        chunk = sock.recv(min(4096, limit - len(buf)))
         if not chunk:
             break
         buf.extend(chunk)
     return bytes(buf)
 
 
-def _parse_status_line(header_blob: bytes) -> Tuple[Optional[int], Dict[str, str]]:
-    text = header_blob.decode("iso-8859-1", errors="replace")
-    lines = text.split("\r\n")
-    status = None
+def valid_broker_request_id(value: object) -> bool:
+    # IDs issued by new_id("breq") in the trusted broker.
+    return isinstance(value, str) and re.fullmatch(r"breq-[0-9a-f]{12}", value) is not None
+
+
+def _parse_http_head(header_blob: bytes) -> Tuple[Optional[int], Dict[str, str]]:
+    head, marker, _ = header_blob.partition(b"\r\n\r\n")
+    if not marker:
+        return None, {}
+    lines = head.split(b"\r\n")
+    status_line = re.fullmatch(
+        rb"HTTP/1\.[01] ([1-5][0-9]{2}) [\t\x20-\x7e\x80-\xff]*", lines[0]
+    )
+    if status_line is None:
+        return None, {}
     headers: Dict[str, str] = {}
-    if lines:
-        parts = lines[0].split()
-        if len(parts) >= 2 and parts[1].isdigit():
-            status = int(parts[1])
     for line in lines[1:]:
-        if not line or ":" not in line:
-            continue
-        k, v = line.split(":", 1)
-        headers[k.strip().lower()] = v.strip()
-    return status, headers
+        field = re.fullmatch(
+            rb"([!#$%&'*+.^_`|~0-9A-Za-z-]+):([\t\x20-\x7e\x80-\xff]*)", line
+        )
+        if field is None:
+            return None, {}
+        name = field[1].decode("ascii").lower()
+        if name in {"x-eos-request-id", "x-eos-deny"} and name in headers:
+            return None, {}
+        headers[name] = field[2].decode("iso-8859-1").strip(" \t")
+    return int(status_line[1]), headers
+
+
+def _read_final_http_status(sock: ssl.SSLSocket) -> Optional[int]:
+    marker = b"\r\n\r\n"
+    remaining = 65536
+    pending = b""
+    while remaining > 0:
+        response = _recv_until(sock, marker, limit=remaining, initial=pending)
+        status, _ = _parse_http_head(response)
+        if status is None or status == 101:
+            return None
+        if status >= 200:
+            return status
+        _, _, pending = response.partition(marker)
+        remaining -= len(response) - len(pending)
+    return None
 
 
 def https_connect_probe(
@@ -216,8 +250,11 @@ def https_connect_probe(
         result.record(STAGE_CONNECT_SENT, True, f"{target_host}:{target_port}")
 
         header_blob = _recv_until(raw, b"\r\n\r\n")
-        status, headers = _parse_status_line(header_blob)
+        status, headers = _parse_http_head(header_blob)
         result.connect_status = status
+        broker_request_id = headers.get("x-eos-request-id")
+        if valid_broker_request_id(broker_request_id):
+            result.broker_request_id = broker_request_id
         deny = headers.get("x-eos-deny")
         result.deny_reason = deny
         result.record(
@@ -251,6 +288,13 @@ def https_connect_probe(
             result.failure_code = "unexpected_allow"
             return result
 
+        if deny is not None:
+            result.record(STAGE_CONNECT_RESPONSE, False, FAILURE_CONNECT_UNEXPECTED)
+            return result
+        if result.broker_request_id is None or result.broker_request_id == request_id:
+            result.record(STAGE_CONNECT_RESPONSE, False, FAILURE_BROKER_REQUEST_ID)
+            return result
+
         result.record(STAGE_TLS_STARTED, True, "ssl_wrap")
         ctx = ssl.create_default_context()
         try:
@@ -282,11 +326,10 @@ def https_connect_probe(
         tls_sock.sendall(http_req)
         result.record(STAGE_HTTP_SENT, True, f"GET {http_path}")
 
-        resp = _recv_until(tls_sock, b"\r\n\r\n")
-        http_status, _ = _parse_status_line(resp)
+        http_status = _read_final_http_status(tls_sock)
         result.http_status = http_status
         if http_status is None:
-            result.record(STAGE_HTTP_RESPONSE, False, "no_status_line")
+            result.record(STAGE_HTTP_RESPONSE, False, "invalid_final_response")
             result.failure_code = FAILURE_HTTP
             return result
         result.record(STAGE_HTTP_RESPONSE, True, f"status={http_status}")
