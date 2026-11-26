@@ -50,6 +50,7 @@ from engineering_os.infrastructure.network.probe.probe_transport import (
 BROKER_ID = "breq-0123456789ab"
 OTHER_BROKER_ID = "breq-0123456789cd"
 CLIENT_ID = "req-allow-inj"
+CONTAINER_ID = "a" * 64
 OPENSSL = shutil.which("openssl")
 
 
@@ -531,7 +532,8 @@ class EnforcementEvidenceTests(unittest.TestCase):
         ]
 
     def run_fixture(
-        self, *, events=None, lines=None, container_cleanup=True, broker_cleanup=True, injected=False
+        self, *, events=None, lines=None, container_cleanup=True, broker_cleanup=True,
+        injected=False, cleanup_overrides=None
     ):
         work_dir = Path(self.temp.name)
         runtime = create_autospec(BrokerRuntime, instance=True)
@@ -547,7 +549,23 @@ class EnforcementEvidenceTests(unittest.TestCase):
             "cleanup_verified": broker_cleanup,
             "tunnel_events": self.allowed_events + self.denied_events if events is None else events,
         }
-        handle = InjectedNetworkProbeProcess(lines=self.lines if lines is None else lines)
+        handle = InjectedNetworkProbeProcess(
+            container_id=CONTAINER_ID, lines=self.lines if lines is None else lines
+        )
+        cleanup = {
+            "container_id": CONTAINER_ID,
+            "cleaned_up": container_cleanup,
+            "cleanup_requested": True,
+            "cleanup_verified": container_cleanup,
+            "cleanup_returncode": 0 if container_cleanup else 125,
+            "removal_succeeded": container_cleanup,
+            "container_presence": {
+                "container_id": CONTAINER_ID,
+                "state": "absent" if container_cleanup else "unknown",
+                "returncode": 1 if container_cleanup else None,
+            },
+            **(cleanup_overrides or {}),
+        }
         executor = NetworkProbeExecutor(
             broker_runtime=runtime,
             allow_real_podman=True,
@@ -555,11 +573,14 @@ class EnforcementEvidenceTests(unittest.TestCase):
         )
         digest = "sha256:" + "a" * 64
         module = "engineering_os.infrastructure.network.probe.network_probe_executor"
+
+        def start(argv, *, container_name):
+            return handle, argv
+
         with (
             patch.object(executor, "resolve_image", return_value=synthetic_probe_image(digest)),
-            patch.object(handle, "cleanup", return_value={"cleaned_up": container_cleanup}),
-            patch(f"{module}.subprocess.Popen") as popen,
-            patch(f"{module}.SubprocessOciHandle", return_value=handle),
+            patch.object(handle, "cleanup", return_value=cleanup),
+            patch(f"{module}.SubprocessOciHandle.start_podman", side_effect=start) as spawn,
             patch(f"{module}._seed_broker_policy_denials"),
         ):
             result = executor.run(
@@ -569,7 +590,7 @@ class EnforcementEvidenceTests(unittest.TestCase):
                 allow_phase_b=True,
                 owner_authorize_runtime_execution=True,
             )
-        self.assertEqual(popen.call_count, 0 if injected else 1, result.failure_reason)
+        self.assertEqual(spawn.call_count, 0 if injected else 1, result.failure_reason)
         return result
 
     def test_complete_correlation_is_required_by_the_podman_branch(self) -> None:
@@ -693,6 +714,29 @@ class EnforcementEvidenceTests(unittest.TestCase):
                 self.assertEqual(result.status, "FAILED")
                 self.assertEqual(result.failure_reason, "probe_cleanup_incomplete")
                 self.assertFalse(result.enforcement_verified)
+
+    def test_complete_network_evidence_cannot_override_invalid_cleanup(self) -> None:
+        for overrides in (
+            {"cleaned_up": True, "cleanup_verified": False},
+            {"cleaned_up": False, "cleanup_verified": True},
+            {"cleanup_returncode": None},
+            {"cleanup_returncode": 125},
+            {"container_id": "b" * 64},
+            {"container_presence": None},
+            {"container_presence": {"container_id": "b" * 64, "state": "absent", "returncode": 1}},
+            {"container_presence": {"container_id": CONTAINER_ID, "state": "present", "returncode": 0}},
+            {"container_presence": {"container_id": CONTAINER_ID, "state": "unknown", "returncode": None}},
+            {"container_presence": {"container_id": CONTAINER_ID, "state": "absent", "returncode": 125}},
+        ):
+            with self.subTest(overrides=overrides):
+                result = self.run_fixture(cleanup_overrides=overrides)
+                self.assertTrue(result.cleanup["broker"]["cleanup_verified"])
+                self.assertTrue(result.transport_verified)
+                self.assertTrue(result.allowed_path["broker_correlation_verified"])
+                self.assertTrue(all(path["ok"] for path in result.denied_paths))
+                self.assertFalse(result.enforcement_verified)
+                self.assertEqual(result.status, "FAILED")
+                self.assertEqual(result.failure_reason, "probe_cleanup_incomplete")
 
     def test_injected_run_with_complete_evidence_cannot_verify_enforcement(self) -> None:
         result = self.run_fixture(injected=True)

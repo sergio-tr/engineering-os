@@ -361,21 +361,9 @@ class PodmanSandboxExecutor:
         self, plan: FixturePlan, request: FixtureLaunchRequest
     ) -> SubprocessOciHandle:
         # Real path — not invoked by automated tests in EOS-08.
-        proc = subprocess.Popen(
-            plan.argv,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            bufsize=1,
-        )
         name = f"eos-acp-fix-{request.execution_id[-12:]}"
-        return SubprocessOciHandle(
-            proc,
-            container_name=name,
-            container_id=name,
-            cleanup_argv=["podman", "rm", "-f", name],
-        )
+        handle, _ = SubprocessOciHandle.start_podman(plan.argv, container_name=name)
+        return handle
 
 
 def default_injected_factory(scenario: str = "success") -> ProcessFactory:

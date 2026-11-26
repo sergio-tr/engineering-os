@@ -16,7 +16,6 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 import json
 import os
 import re
-import subprocess
 import tempfile
 
 from engineering_os.domain.models import new_id, utc_now
@@ -48,6 +47,7 @@ from engineering_os.infrastructure.runtime.oci.oci_process import (
     InjectedFixtureProcess,
     OciProcessHandle,
     SubprocessOciHandle,
+    valid_podman_container_id,
 )
 from engineering_os.infrastructure.network.probe.probe_image import (
     ProbeImageError,
@@ -1113,21 +1113,7 @@ class NetworkProbeExecutor:
                     status = "REFUSED_PODMAN_DISABLED"
                     provenance = ERROR
                 else:
-                    proc = subprocess.Popen(
-                        argv,
-                        stdin=subprocess.PIPE,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE,
-                        text=True,
-                        bufsize=1,
-                    )
-                    handle = SubprocessOciHandle(
-                        proc,
-                        container_name=name,
-                        container_id=name,
-                        cleanup_argv=["podman", "rm", "-f", name],
-                        grace_seconds=2.0,
-                    )
+                    handle, argv = SubprocessOciHandle.start_podman(argv, container_name=name)
                     provenance = SYNTHETIC_OCI_EXECUTED
                     mode = "PODMAN"
 
@@ -1191,9 +1177,12 @@ class NetworkProbeExecutor:
             c.get("ok") for c in cases if c.get("layer") == "policy"
         )
         runtime_ok = all(c.get("ok") for c in cases if c.get("layer") == "runtime")
-        cleanup_ok = bool(cleanup_handle.get("cleaned_up")) and bool(
-            broker_cleanup.get("cleanup_verified")
-        )
+        container_cleanup_ok = cleanup_handle.get("cleaned_up") is True
+        if mode == "PODMAN":
+            container_cleanup_ok = _verified_container_removal(
+                cleanup_handle, handle.container_id if handle else None
+            )
+        cleanup_ok = container_cleanup_ok and broker_cleanup.get("cleanup_verified") is True
 
         # Attach container observation cases (never promote attempted→ok).
         for case_name, outcome in observations.items():
@@ -1384,6 +1373,27 @@ class NetworkProbeExecutor:
             tunnel_events=tunnel_events,
             probe_events=probe_events,
         )
+
+
+def _verified_container_removal(cleanup: Dict[str, Any], expected_id: Optional[str]) -> bool:
+    presence = cleanup.get("container_presence")
+    return (
+        valid_podman_container_id(expected_id)
+        and cleanup.get("container_id") == expected_id
+        and cleanup.get("cleanup_requested") is True
+        and cleanup.get("removal_succeeded") is True
+        and type(cleanup.get("cleanup_returncode")) is int
+        and cleanup["cleanup_returncode"] == 0
+        and cleanup.get("cleaned_up") is True
+        and cleanup.get("cleanup_verified") is True
+        and not cleanup.get("error")
+        and isinstance(presence, dict)
+        and not presence.get("error")
+        and presence.get("container_id") == expected_id
+        and presence.get("state") == "absent"
+        and type(presence.get("returncode")) is int
+        and presence["returncode"] == 1
+    )
 
 
 def _maybe_int(value: Any) -> Optional[int]:

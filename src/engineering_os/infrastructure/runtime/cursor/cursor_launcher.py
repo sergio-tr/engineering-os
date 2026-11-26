@@ -9,7 +9,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence
 import re
-import subprocess
 
 from engineering_os.domain.models import new_id, utc_now
 from engineering_os.infrastructure.security.credentials.credential_provider import (
@@ -453,23 +452,14 @@ class CursorAcpLauncher:
         # Strip potentially confusing proxy vars so pasta path is authoritative.
         for k in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY"):
             full_env.pop(k, None)
-        proc = subprocess.Popen(
-            plan.argv,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            bufsize=1,
-            env=full_env,
-        )
         name = f"eos-cursor-{request.execution_id[-12:]}"
-        return SubprocessOciHandle(
-            proc,
+        handle, _ = SubprocessOciHandle.start_podman(
+            plan.argv,
             container_name=name,
-            container_id=name,
-            cleanup_argv=["podman", "rm", "-f", name],
+            env=full_env,
             grace_seconds=self.grace_seconds,
         )
+        return handle
 
 
 def default_cursor_injected_factory(scenario: str = "success") -> ProcessFactory:
