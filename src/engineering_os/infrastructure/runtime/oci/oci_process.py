@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from copy import deepcopy
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Sequence
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 import io
 import json
+import re
 import subprocess
+import tempfile
 import threading
 import time
 
@@ -28,6 +32,11 @@ TERMINATION_EXITED = "exited"
 TERMINATION_TIMEOUT = "timeout"
 TERMINATION_CANCELLED = "cancelled"
 TERMINATION_ALREADY_DEAD = "already_dead"
+OCI_CLEANUP_TIMEOUT_SECONDS = 10.0
+
+
+def valid_podman_container_id(value: object) -> bool:
+    return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
 
 
 @dataclass
@@ -337,6 +346,9 @@ class SubprocessOciHandle(OciProcessHandle):
         self.proc = proc
         self.container_name = container_name
         self._container_id = container_id or container_name
+        self._identity_dir: Optional[tempfile.TemporaryDirectory] = None
+        self._cleanup_lock = threading.Lock()
+        self._cleanup_result: Optional[Dict[str, Any]] = None
         self.cleanup_argv = list(cleanup_argv or [])
         self.runner = runner
         self.grace_seconds = grace_seconds
@@ -354,6 +366,38 @@ class SubprocessOciHandle(OciProcessHandle):
         self._sigkill_used = False
         self._cleanup_verified = False
         self._stdin_closed = False
+
+    @classmethod
+    def start_podman(
+        cls,
+        argv: Sequence[str],
+        *,
+        container_name: str,
+        env: Optional[Dict[str, str]] = None,
+        grace_seconds: float = 2.0,
+    ) -> Tuple["SubprocessOciHandle", List[str]]:
+        """Capture the runtime-issued ID in a private, host-only directory."""
+        identity_dir = tempfile.TemporaryDirectory(
+            prefix="eos-oci-", ignore_cleanup_errors=True
+        )
+        cidfile = Path(identity_dir.name) / "container.id"
+        command = [*argv[:2], "--cidfile", str(cidfile), *argv[2:]]
+        try:
+            proc = subprocess.Popen(
+                command,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+                env=env,
+            )
+        except Exception:
+            identity_dir.cleanup()
+            raise
+        handle = cls(proc, container_name=container_name, grace_seconds=grace_seconds)
+        handle._identity_dir = identity_dir
+        return handle, command
 
     @property
     def container_id(self) -> Optional[str]:
@@ -503,52 +547,91 @@ class SubprocessOciHandle(OciProcessHandle):
         self.kill()
         return self.wait(timeout=5)
 
+    def _run_cleanup_command(self, argv: List[str]) -> Tuple[Optional[int], Optional[str]]:
+        try:
+            if self.runner is not None:
+                completed = self.runner(argv, OCI_CLEANUP_TIMEOUT_SECONDS)
+            else:
+                completed = subprocess.run(
+                    argv, capture_output=True, text=True,
+                    timeout=OCI_CLEANUP_TIMEOUT_SECONDS, check=False,
+                )
+        except Exception as exc:
+            return None, type(exc).__name__
+        rc = getattr(completed, "returncode", None)
+        return (rc, None) if type(rc) is int else (None, "missing_returncode")
+
+    def _read_podman_id(self, cidfile: Path) -> Optional[str]:
+        try:
+            with cidfile.open(encoding="ascii") as f:
+                value = f.read(66).removesuffix("\n")
+        except (OSError, UnicodeError):
+            return None
+        return value if valid_podman_container_id(value) else None
+
+    def _podman_cleanup(self, cidfile: Path) -> Dict[str, Any]:
+        container_id = self._read_podman_id(cidfile)
+        presence: Dict[str, Any] = {
+            "container_id": container_id, "state": "unknown", "returncode": None,
+        }
+        if container_id is None:
+            return {"error": "container_identity_unavailable", "container_presence": presence}
+
+        self._container_id = container_id
+        rc, error = self._run_cleanup_command(["podman", "rm", "-f", container_id])
+        evidence = {
+            "cleanup_returncode": rc, "removal_succeeded": rc == 0,
+            "container_presence": presence,
+        }
+        if rc != 0:
+            evidence["error"] = error or "container_removal_failed"
+            return evidence
+
+        rc, error = self._run_cleanup_command(["podman", "container", "exists", container_id])
+        presence["returncode"] = rc
+        # Like the PoC query, only the runtime's explicit absence response counts.
+        presence["state"] = {0: "present", 1: "absent"}.get(rc, "unknown")
+        if presence["state"] != "absent":
+            evidence["error"] = error or f"container_presence_{presence['state']}"
+        return evidence
+
     def cleanup(self, *, grace_seconds: float = 2.0) -> Dict[str, Any]:
+        with self._cleanup_lock:
+            if self._cleanup_result is None:
+                self._cleanup_result = self._cleanup_once(grace_seconds)
+            return deepcopy(self._cleanup_result)
+
+    def _cleanup_once(self, grace_seconds: float) -> Dict[str, Any]:
         grace = grace_seconds if grace_seconds is not None else self.grace_seconds
         result = self.shutdown_gracefully(grace_seconds=grace)
-        cleanup_rc = None
-        cleanup_error = None
-        if self.cleanup_argv:
+        evidence: Dict[str, Any] = {"cleanup_returncode": None, "removal_succeeded": False}
+        if self._identity_dir is not None:
             try:
-                if self.runner:
-                    completed = self.runner(self.cleanup_argv, 10.0)
-                    cleanup_rc = getattr(completed, "returncode", None)
-                else:
-                    completed = subprocess.run(
-                        list(self.cleanup_argv),
-                        capture_output=True,
-                        text=True,
-                        timeout=10,
-                        check=False,
-                    )
-                    cleanup_rc = completed.returncode
-            except Exception as exc:  # noqa: BLE001
-                cleanup_error = str(exc)
-                self._cleaned = False
-                self._cleanup_verified = False
-                return {
-                    "cleaned_up": False,
-                    "cleanup_verified": False,
-                    "error": cleanup_error,
-                    "container_id": self._container_id,
-                    "exit_code": result.returncode,
-                    "process_exited_cleanly": result.process_exited_cleanly,
-                    "termination_reason": result.termination_reason,
-                    "sigkill_used": result.sigkill_used,
-                }
-        self._cleaned = True
-        self._cleanup_verified = cleanup_error is None and (
-            cleanup_rc in (0, None) or True
-        )
-        # Cleanup verified when container remove succeeded or no remove needed.
-        if cleanup_rc not in (0, None) and self.cleanup_argv:
-            self._cleanup_verified = False
+                cidfile = Path(self._identity_dir.name) / "container.id"
+                evidence.update(self._podman_cleanup(cidfile))
+            finally:
+                # Retain the OCI identity context even if cleanup was interrupted.
+                self._identity_dir.cleanup()
+            verified = (
+                evidence["removal_succeeded"]
+                and evidence["container_presence"]["state"] == "absent"
+            )
+        elif self.cleanup_argv:
+            rc, error = self._run_cleanup_command(self.cleanup_argv)
+            evidence.update(
+                cleanup_returncode=rc, removal_succeeded=rc == 0,
+                error=error or "container_presence_unavailable",
+            )
+            verified = False
         else:
-            self._cleanup_verified = True
+            # A local subprocess has no container removal to verify.
+            verified = self.proc.poll() is not None
+        self._cleaned = self._cleanup_verified = verified
         return {
-            "cleaned_up": True,
+            **evidence,
+            "cleanup_requested": True,
+            "cleaned_up": self._cleaned,
             "cleanup_verified": self._cleanup_verified,
-            "cleanup_returncode": cleanup_rc,
             "container_id": self._container_id,
             "exit_code": result.returncode,
             "process_exited_cleanly": result.process_exited_cleanly,
