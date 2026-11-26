@@ -171,11 +171,11 @@ class BrokerRuntime:
                     "cleanup_verified": False,
                     "evidence_class": UNAVAILABLE,
                 }
+            broker.mark_crashed()
+            broker.stop()
             observations = broker.observations()
             tunnel_stats = broker.tunnel_stats()
             tunnel_events = broker.tunnel_events()
-            broker.mark_crashed()
-            broker.stop()
             sock_gone = True
             if instance and Path(instance.socket_path).exists():
                 try:

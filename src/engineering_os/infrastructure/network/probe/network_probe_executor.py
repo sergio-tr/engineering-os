@@ -27,6 +27,14 @@ from engineering_os.infrastructure.network.broker.broker_runtime import (
     proxy_compatibility_matrix,
 )
 from engineering_os.infrastructure.network.broker.egress_broker import (
+    EVT_CONNECT_RECEIVED,
+    EVT_DESTINATION_ALLOWED,
+    EVT_DNS_RESOLVED,
+    EVT_TUNNEL_BYTES_TRANSFERRED,
+    EVT_TUNNEL_CLOSED,
+    EVT_TUNNEL_ESTABLISHED,
+    EVT_UPSTREAM_CONNECTED,
+    EVT_UPSTREAM_CONNECT_STARTED,
     blocked_connect,
     default_resolve,
 )
@@ -48,6 +56,14 @@ from engineering_os.infrastructure.network.probe.probe_image import (
     resolve_probe_image,
     synthetic_probe_image,
     validate_probe_image_ref,
+)
+from engineering_os.infrastructure.network.probe.probe_transport import (
+    STAGE_CERT_VALIDATED,
+    STAGE_CONNECT_200,
+    STAGE_HTTP_RESPONSE,
+    STAGE_HTTP_SENT,
+    STAGE_TLS_COMPLETED,
+    valid_broker_request_id,
 )
 from engineering_os.infrastructure.runtime.oci.podman_executor import (
     require_owner_execution_gates,
@@ -79,6 +95,18 @@ REQUIRED_CONTAINER_OBSERVATIONS: Dict[str, Set[str]] = {
 }
 
 FALSE_POSITIVE_OUTCOMES = {"attempted", "skipped", "missing", "error", "LEAK"}
+ALLOWED_SUMMARY_FIELDS = {
+    "relay_ready",
+    "connect_status",
+    "tls_ok",
+    "cert_ok",
+    "http_status",
+    "transport_verified",
+    "failure_stage",
+    "failure_code",
+    "request_id",
+    "broker_request_id",
+}
 
 
 @dataclass
@@ -311,7 +339,8 @@ def main() -> int:
         f"transport_verified={allowed.transport_verified} "
         f"failure_stage={allowed.failure_stage or '-'} "
         f"failure_code={allowed.failure_code or '-'} "
-        f"request_id={req_allow}"
+        f"request_id={allowed.request_id} "
+        f"broker_request_id={allowed.broker_request_id or '-'}"
     )
 
     # --- Denied destinations: require CONNECT 403 + deny reason ---
@@ -476,9 +505,15 @@ def parse_probe_output(
     diagnostics: List[str] = []
     events: List[Dict[str, Any]] = []
     allowed_path: Dict[str, Any] = {}
+    allowed_http: List[List[str]] = []
     done = False
+    allowed_summary_seen = False
     for raw in lines:
         line = raw.strip()
+        parts = line.split()
+        if not parts:
+            continue
+        record = parts[0]
         if line == "PROBE_DONE":
             done = True
             continue
@@ -486,15 +521,27 @@ def parse_probe_output(
             diagnostics.append(line)
             observations["relay_runtime"] = "missing"
             continue
-        if line.startswith("PROBE_ALLOWED_PATH"):
-            for token in line.split()[1:]:
-                if "=" in token:
-                    k, v = token.split("=", 1)
-                    allowed_path[k] = v
+        if record == "PROBE_ALLOWED_PATH":
+            if allowed_summary_seen:
+                diagnostics.append("duplicate_allowed_path")
+                continue
+            allowed_summary_seen = True
+            for token in parts[1:]:
+                key, sep, value = token.partition("=")
+                if (
+                    not sep
+                    or not value
+                    or key not in ALLOWED_SUMMARY_FIELDS
+                    or key in allowed_path
+                ):
+                    diagnostics.append("invalid_allowed_path_field")
+                    continue
+                allowed_path[key] = value
             continue
-        if line.startswith("PROBE_EVENT"):
-            parts = line.split()
+        if record == "PROBE_EVENT":
             if len(parts) >= 5:
+                if parts[1] == "allowed_public" and len(parts) != 6:
+                    diagnostics.append("malformed_allowed_event")
                 events.append(
                     {
                         "case": parts[1],
@@ -504,22 +551,33 @@ def parse_probe_output(
                         "request_id": parts[5] if len(parts) > 5 else "",
                     }
                 )
+            elif len(parts) >= 2 and parts[1] == "allowed_public":
+                diagnostics.append("malformed_allowed_event")
             continue
-        if line.startswith("PROBE_HTTP"):
-            parts = line.split()
-            if len(parts) >= 3:
-                allowed_path.setdefault("http_statuses", {})
-                if isinstance(allowed_path["http_statuses"], dict):
-                    allowed_path["http_statuses"][parts[1]] = parts[2]
+        if record == "PROBE_HTTP":
+            if len(parts) >= 2 and parts[1] == "allowed_public":
+                allowed_http.append(parts[2:])
             continue
-        if line.startswith("PROBE_RESULT"):
-            parts = line.split()
+        if record == "PROBE_RESULT":
             if len(parts) >= 3:
+                if parts[1] == "allowed_public" and parts[1] in observations:
+                    diagnostics.append("duplicate_allowed_result")
+                    continue
                 observations[parts[1]] = parts[2]
-                if parts[1] == "allowed_public" and len(parts) >= 4:
-                    allowed_path["result_detail"] = parts[3]
+                if parts[1] == "allowed_public":
+                    if len(parts) == 5:
+                        allowed_path["result_detail"] = parts[3]
+                        allowed_path["result_request_id"] = parts[4]
+                    else:
+                        diagnostics.append("malformed_allowed_result")
             else:
                 diagnostics.append(f"malformed:{line}")
+    if allowed_http:
+        expected = [allowed_path.get("http_status"), allowed_path.get("request_id")]
+        if allowed_http == [expected]:
+            allowed_path["http_statuses"] = {"allowed_public": expected[0]}
+        else:
+            diagnostics.append("inconsistent_allowed_http")
     return observations, done, diagnostics, events, allowed_path
 
 
@@ -552,6 +610,116 @@ def evaluate_container_observations(
         if tv and tv not in {"true", "1", "yes"}:
             problems.append("allowed_public_ok_without_transport_verified")
     return (not problems), problems
+
+
+def _allowed_flag(allowed_path: Dict[str, Any], field_name: str) -> bool:
+    return str(allowed_path.get(field_name, "")).lower() in {"true", "1", "yes"}
+
+
+def _allowed_transport_verified(
+    allowed_path: Dict[str, Any], probe_events: Sequence[Dict[str, Any]]
+) -> bool:
+    """Check that the result, summary, and stage evidence describe one exchange."""
+    client_id = allowed_path.get("request_id")
+    status = allowed_path.get("http_status", "")
+    if (
+        client_id in (None, "", "-")
+        or allowed_path.get("result_request_id") != client_id
+        or re.fullmatch(r"[2-5][0-9]{2}", status) is None
+        or allowed_path.get("result_detail") != f"http_{status}"
+        or allowed_path.get("http_statuses") != {"allowed_public": status}
+        or allowed_path.get("connect_status") != "200"
+        or allowed_path.get("failure_stage") != "-"
+        or allowed_path.get("failure_code") != "-"
+        or not all(
+            _allowed_flag(allowed_path, name)
+            for name in ("relay_ready", "tls_ok", "cert_ok", "transport_verified")
+        )
+    ):
+        return False
+
+    events = [event for event in probe_events if event["case"] == "allowed_public"]
+    if any(event["request_id"] != client_id or not event["ok"] for event in events):
+        return False
+    stages = {
+        STAGE_CONNECT_200: "connection_established",
+        STAGE_TLS_COMPLETED: "handshake_ok",
+        STAGE_CERT_VALIDATED: "hostname=api.cursor.com",
+        STAGE_HTTP_SENT: "GET_/",
+        STAGE_HTTP_RESPONSE: f"status={status}",
+    }
+    observed = [(e["code"], e["detail"]) for e in events if e["code"] in stages]
+    return observed == list(stages.items())
+
+
+@dataclass(frozen=True)
+class AllowedBrokerEvidence:
+    stages: Set[str] = field(default_factory=set)
+    bidirectional_traffic: bool = False
+    verified: bool = False
+
+
+def correlate_allowed_with_broker(
+    allowed_path: Dict[str, Any],
+    tunnel_events: Sequence[Dict[str, Any]],
+) -> AllowedBrokerEvidence:
+    """Verify the broker events for the CONNECT response's request ID."""
+    broker_id = allowed_path.get("broker_request_id")
+    client_id = allowed_path.get("request_id")
+    if not valid_broker_request_id(broker_id) or client_id in (None, "", "-", broker_id):
+        return AllowedBrokerEvidence()
+
+    events = [event for event in tunnel_events if event.get("request_id") == broker_id]
+    if any(
+        event.get("host") != "api.cursor.com"
+        or event.get("port") != 443
+        for event in events
+    ):
+        return AllowedBrokerEvidence()
+
+    received = [event for event in events if event.get("code") == EVT_CONNECT_RECEIVED]
+    if len(received) != 1 or received[0].get("detail") != f"client_req_id={client_id}":
+        return AllowedBrokerEvidence()
+
+    codes = [event.get("code") for event in events]
+    chain = [
+        EVT_CONNECT_RECEIVED,
+        EVT_DESTINATION_ALLOWED,
+        EVT_DNS_RESOLVED,
+        EVT_UPSTREAM_CONNECT_STARTED,
+        EVT_UPSTREAM_CONNECTED,
+        EVT_TUNNEL_ESTABLISHED,
+        EVT_TUNNEL_BYTES_TRANSFERRED,
+        EVT_TUNNEL_CLOSED,
+    ]
+    optional = {EVT_UPSTREAM_CONNECT_STARTED, EVT_TUNNEL_CLOSED}
+    expected = [code for code in chain if code not in optional or code in codes]
+    successful = [event for event in events if event.get("ok") is True]
+    traffic_events = [
+        event for event in successful if event.get("code") == EVT_TUNNEL_BYTES_TRANSFERRED
+    ]
+    traffic = len(traffic_events) == 1 and _has_bidirectional_traffic(
+        traffic_events[0].get("detail")
+    )
+    return AllowedBrokerEvidence(
+        stages={
+            event["code"] for event in successful if isinstance(event.get("code"), str)
+        },
+        bidirectional_traffic=traffic,
+        verified=traffic and codes == expected and len(successful) == len(events),
+    )
+
+
+def _has_bidirectional_traffic(detail: object) -> bool:
+    match = re.fullmatch(
+        r"bytes=([1-9][0-9]{0,19}) client_to_upstream=([1-9][0-9]{0,19}) "
+        r"upstream_to_client=([1-9][0-9]{0,19})",
+        str(detail),
+    )
+    if match is None:
+        return False
+    total, sent, received = map(int, match.groups())
+    return total == sent + received
 
 
 def correlate_denied_with_broker(
@@ -617,6 +785,7 @@ class InjectedNetworkProbeProcess(InjectedFixtureProcess):
                 "PROBE_EVENT allowed_public CONNECT_200 ok connection_established req-allow-inj",
                 "PROBE_EVENT allowed_public TLS_COMPLETED ok handshake_ok req-allow-inj",
                 "PROBE_EVENT allowed_public CERT_VALIDATED ok hostname=api.cursor.com req-allow-inj",
+                "PROBE_EVENT allowed_public HTTP_SENT ok GET_/ req-allow-inj",
                 "PROBE_EVENT allowed_public HTTP_RESPONSE ok status=403 req-allow-inj",
                 "PROBE_ALLOWED_PATH relay_ready=true connect_status=200 tls_ok=true cert_ok=true http_status=403 transport_verified=true failure_stage=- failure_code=- request_id=req-allow-inj",
                 "PROBE_RESULT allowed_public ok http_403 req-allow-inj",
@@ -1058,23 +1227,14 @@ class NetworkProbeExecutor:
                 }
             )
 
-        # CONNECT 200 alone is insufficient; require TLS+cert+HTTP status flags.
-        transport_flag = str(allowed_path.get("transport_verified", "")).lower() in {
-            "true",
-            "1",
-            "yes",
-        }
-        tls_flag = str(allowed_path.get("tls_ok", "")).lower() in {"true", "1", "yes"}
-        cert_flag = str(allowed_path.get("cert_ok", "")).lower() in {"true", "1", "yes"}
-        allowed_ok = observations.get("allowed_public") == "ok"
         transport_ok = (
             mode in {"INJECTED", "PODMAN"}
-            and allowed_ok
-            and transport_flag
-            and tls_flag
-            and cert_flag
+            and observations.get("allowed_public") == "ok"
             and "relay_runtime" not in observations
+            and not diagnostics
+            and _allowed_transport_verified(allowed_path, probe_events)
         )
+        allowed_broker = correlate_allowed_with_broker(allowed_path, tunnel_events)
         # Broker-confirmed denials required only for real OCI enforcement.
         denials_ok = not deny_problems if mode == "PODMAN" else True
         for problem in deny_problems if mode == "PODMAN" else []:
@@ -1093,6 +1253,7 @@ class NetworkProbeExecutor:
             and obs_ok
             and transport_ok
             and denials_ok
+            and allowed_broker.verified
             and cleanup_ok
             and mode == "PODMAN"
             and status != "REFUSED_PODMAN_DISABLED"
@@ -1108,6 +1269,10 @@ class NetworkProbeExecutor:
             verification_level = "ENFORCEMENT_VERIFIED"
             status = "COMPLETED"
             failure_reason = None
+        elif policy_ok and transport_ok and obs_ok and not cleanup_ok:
+            verification_level = "TRANSPORT_VERIFIED"
+            status = "FAILED"
+            failure_reason = "probe_cleanup_incomplete"
         elif policy_ok and transport_ok and obs_ok and mode == "INJECTED":
             verification_level = "TRANSPORT_VERIFIED"
             status = "COMPLETED"
@@ -1118,10 +1283,18 @@ class NetworkProbeExecutor:
             failure_reason = "broker_denial_correlation_incomplete:" + ",".join(
                 deny_problems
             )
+        elif policy_ok and transport_ok and mode == "PODMAN" and not allowed_broker.verified:
+            verification_level = "TRANSPORT_VERIFIED"
+            status = "FAILED"
+            failure_reason = "broker_allowed_correlation_incomplete"
         elif policy_ok and not obs_ok:
             verification_level = "POLICY_VALIDATED"
             status = "FAILED"
             failure_reason = "container_evidence_incomplete:" + ",".join(obs_problems)
+        elif policy_ok and not transport_ok and mode in {"INJECTED", "PODMAN"}:
+            verification_level = "POLICY_VALIDATED"
+            status = "FAILED"
+            failure_reason = "container_allowed_transport_incomplete"
         else:
             verification_level = "FAILED"
             status = "FAILED"
@@ -1132,23 +1305,19 @@ class NetworkProbeExecutor:
 
         # Normalize allowed_path booleans for machine-readable output.
         allowed_path_out = {
-            "relay_ready": str(allowed_path.get("relay_ready", "")).lower()
-            in {"true", "1", "yes"},
-            "broker_connected": any(
-                e.get("code") == "CONNECT_RECEIVED" for e in tunnel_events
-            ),
+            "relay_ready": _allowed_flag(allowed_path, "relay_ready"),
+            "broker_connected": EVT_CONNECT_RECEIVED in allowed_broker.stages,
             "connect_response_code": _maybe_int(allowed_path.get("connect_status")),
-            "destination_allowed": allowed_ok and transport_flag,
-            "dns_resolution": any(
-                e.get("code") == "DNS_RESOLVED" for e in tunnel_events
-            ),
-            "upstream_connected": any(
-                e.get("code") == "UPSTREAM_CONNECTED" for e in tunnel_events
-            ),
-            "tls_handshake": tls_flag,
-            "certificate_validated": cert_flag,
+            "destination_allowed": EVT_DESTINATION_ALLOWED in allowed_broker.stages,
+            "dns_resolution": EVT_DNS_RESOLVED in allowed_broker.stages,
+            "upstream_connected": EVT_UPSTREAM_CONNECTED in allowed_broker.stages,
+            "tunnel_established": EVT_TUNNEL_ESTABLISHED in allowed_broker.stages,
+            "bidirectional_traffic": allowed_broker.bidirectional_traffic,
+            "broker_correlation_verified": allowed_broker.verified,
+            "tls_handshake": _allowed_flag(allowed_path, "tls_ok"),
+            "certificate_validated": _allowed_flag(allowed_path, "cert_ok"),
             "http_status": _maybe_int(allowed_path.get("http_status")),
-            "transport_verified": transport_flag,
+            "transport_verified": transport_ok,
             "failure_stage": allowed_path.get("failure_stage")
             if str(allowed_path.get("failure_stage", "-")) not in {"-", ""}
             else None,
@@ -1156,6 +1325,11 @@ class NetworkProbeExecutor:
             if str(allowed_path.get("failure_code", "-")) not in {"-", ""}
             else None,
             "request_id": allowed_path.get("request_id"),
+            "broker_request_id": (
+                allowed_path["broker_request_id"]
+                if valid_broker_request_id(allowed_path.get("broker_request_id"))
+                else None
+            ),
             "raw": dict(allowed_path),
         }
 

@@ -176,11 +176,16 @@ def forward_bidirectional(
     """Bounded bidirectional byte relay until EOF, cancel, deadline or limit."""
     left.setblocking(False)
     right.setblocking(False)
+    directions = (
+        ("client_to_upstream", left, right),
+        ("upstream_to_client", right, left),
+    )
+    directional_bytes = dict.fromkeys((name for name, _, _ in directions), 0)
     transferred = 0
     started = time.monotonic()
     reason = "ok"
     try:
-        while True:
+        while reason == "ok":
             if time.monotonic() - started >= deadline_seconds:
                 reason = "deadline_exceeded"
                 break
@@ -195,33 +200,29 @@ def forward_bidirectional(
                 break
             if not readable:
                 continue
-            for src, dst in ((left, right), (right, left)):
+            for direction, src, dst in directions:
                 if src not in readable:
                     continue
+                if transferred >= max_bytes:
+                    reason = "byte_limit_exceeded"
+                    break
                 try:
                     data = src.recv(min(chunk_size, max_bytes - transferred))
                 except BlockingIOError:
                     continue
                 except OSError:
                     reason = "recv_error"
-                    data = b""
+                    break
                 if not data:
                     reason = "peer_closed"
-                    return {
-                        "bytes": transferred,
-                        "reason": reason,
-                        "elapsed_seconds": round(time.monotonic() - started, 4),
-                    }
+                    break
                 try:
                     dst.sendall(data)
                 except OSError:
                     reason = "send_error"
-                    return {
-                        "bytes": transferred,
-                        "reason": reason,
-                        "elapsed_seconds": round(time.monotonic() - started, 4),
-                    }
+                    break
                 transferred += len(data)
+                directional_bytes[direction] += len(data)
     finally:
         for sock in (left, right):
             try:
@@ -234,6 +235,7 @@ def forward_bidirectional(
                 pass
     return {
         "bytes": transferred,
+        **directional_bytes,
         "reason": reason,
         "elapsed_seconds": round(time.monotonic() - started, 4),
     }
@@ -639,14 +641,6 @@ class TrustedEgressBroker:
                     ok=False,
                     detail=decision.reason,
                 )
-            elif decision.allowed and decision.resolved_addrs:
-                self.emit_event(
-                    EVT_DNS_RESOLVED,
-                    request_id=request_id,
-                    host=decision.host,
-                    port=decision.port,
-                    detail=f"addrs={len(decision.resolved_addrs)}",
-                )
 
             if not decision.allowed:
                 self.emit_event(
@@ -674,6 +668,14 @@ class TrustedEgressBroker:
                 port=decision.port,
                 detail=decision.reason,
             )
+            if decision.resolved_addrs:
+                self.emit_event(
+                    EVT_DNS_RESOLVED,
+                    request_id=request_id,
+                    host=decision.host,
+                    port=decision.port,
+                    detail=f"addrs={len(decision.resolved_addrs)}",
+                )
             self.emit_event(
                 EVT_UPSTREAM_CONNECT_STARTED,
                 request_id=request_id,
@@ -753,22 +755,26 @@ class TrustedEgressBroker:
                 close_code = EVT_TUNNEL_TIMEOUT
             elif stats.get("reason") not in {"ok", "peer_closed"}:
                 close_code = EVT_TUNNEL_ERROR
-            self.emit_event(
-                EVT_TUNNEL_BYTES_TRANSFERRED,
-                request_id=request_id,
-                host=decision.host,
-                port=decision.port,
-                detail=f"bytes={stats.get('bytes', 0)}",
-            )
-            self.emit_event(
-                close_code,
-                request_id=request_id,
-                host=decision.host,
-                port=decision.port,
-                ok=close_code == EVT_TUNNEL_CLOSED,
-                detail=str(stats.get("reason")),
-            )
             with self._lock:
+                self.emit_event(
+                    EVT_TUNNEL_BYTES_TRANSFERRED,
+                    request_id=request_id,
+                    host=decision.host,
+                    port=decision.port,
+                    detail=(
+                        f"bytes={stats['bytes']} "
+                        f"client_to_upstream={stats['client_to_upstream']} "
+                        f"upstream_to_client={stats['upstream_to_client']}"
+                    ),
+                )
+                self.emit_event(
+                    close_code,
+                    request_id=request_id,
+                    host=decision.host,
+                    port=decision.port,
+                    ok=close_code == EVT_TUNNEL_CLOSED,
+                    detail=str(stats.get("reason")),
+                )
                 if 0 <= stats_index < len(self._tunnel_stats):
                     self._tunnel_stats[stats_index].update(stats)
                     self._tunnel_stats[stats_index]["closed_at"] = utc_now()
